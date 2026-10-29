@@ -27,6 +27,16 @@ and joins. All reads are limited samples, not full-table/security-policy tests.
 When using `env`, supply the Storage token only in memory. Running the test
 allocates billed read sessions. Do not enable it against an unapproved target.
 
+`sql/onelake_direct_files_live.test` separately requires
+`ONELAKE_LIVE_DIRECT_READ_APPROVED=true` and the same workspace/item/schema/table
+variables, plus in-memory `FABRIC_API_TOKEN` and `AZURE_STORAGE_TOKEN`. Use a
+Lakehouse with a PricePaid-compatible Delta table containing ten non-null prices.
+Its catalog must return an HTTPS OneLake DFS location to exercise conversion to
+the equivalent ABFSS URI, which lets Delta use the Azure access-token secret.
+The host and target path are preserved. Legacy discovery does not enumerate
+MirroredDatabase items; use an authorized Lakehouse table for this test.
+This is read-only and does not change permissions or retry with another identity.
+
 Run its deterministic tests and checks from the repository root:
 
 ```sh
