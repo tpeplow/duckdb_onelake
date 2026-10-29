@@ -1,0 +1,51 @@
+# name: test/sql/onelake_direct_files_live.test
+# description: Opt-in Delta reads using HTTPS OneLake catalog locations and Azure tokens
+# group: [sql]
+
+require onelake
+
+require-env ONELAKE_LIVE_DIRECT_READ_APPROVED true
+
+require-env ONELAKE_TEST_WORKSPACE
+
+require-env ONELAKE_TEST_ITEM
+
+require-env ONELAKE_TEST_SCHEMA
+
+require-env ONELAKE_TEST_TABLE
+
+require parquet
+
+statement ok
+LOAD azure;
+
+statement ok
+LOAD delta;
+
+statement ok
+CREATE SECRET direct_reader (TYPE ONELAKE, PROVIDER credential_chain, CHAIN 'env');
+
+statement ok
+ATTACH '${ONELAKE_TEST_WORKSPACE}/${ONELAKE_TEST_ITEM}' AS direct_read (TYPE ONELAKE, READ_MODE 'DIRECT_FILES', READ_ONLY);
+
+statement ok
+PREPARE direct_sample AS SELECT COUNT(*), COUNT(Price) FROM (SELECT Price FROM direct_read."${ONELAKE_TEST_SCHEMA}"."${ONELAKE_TEST_TABLE}" LIMIT 10);
+
+query II
+EXECUTE direct_sample;
+----
+10	10
+
+query II
+EXECUTE direct_sample;
+----
+10	10
+
+statement ok
+DEALLOCATE direct_sample;
+
+statement ok
+DETACH direct_read;
+
+statement ok
+DROP SECRET direct_reader;

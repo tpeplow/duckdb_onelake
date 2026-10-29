@@ -114,6 +114,31 @@ string ToHttps(const string &input) {
 	return "https://" + host + "/" + container + tail;
 }
 
+string ToAbfss(const string &input) {
+	const string https = "https://";
+	if (!StringUtil::StartsWith(input, https) || input.find_first_of("?#") != string::npos) {
+		return string();
+	}
+	auto host_end = input.find('/', https.size());
+	if (host_end == string::npos) {
+		return string();
+	}
+	auto host = input.substr(https.size(), host_end - https.size());
+	if (!StringUtil::EndsWith(host, ".dfs.fabric.microsoft.com") || host.find_first_of("@:") != string::npos) {
+		return string();
+	}
+	auto container_end = input.find('/', host_end + 1);
+	if (container_end == string::npos || container_end == host_end + 1) {
+		return string();
+	}
+	auto container = input.substr(host_end + 1, container_end - host_end - 1);
+	if (container.find('@') != string::npos) {
+		return string();
+	}
+	// Delta's Azure secret integration is selected by the URI scheme, not the HTTPS host.
+	return "abfss://" + container + "@" + host + input.substr(container_end);
+}
+
 void AddCandidate(vector<string> &candidates, std::unordered_set<string> &seen, const string &candidate,
                   bool prepend = false) {
 	if (candidate.empty()) {
@@ -147,6 +172,7 @@ vector<string> BuildLocationCandidates(const OneLakeCatalog &catalog, const OneL
 
 	auto normalized = NormalizeSlashes(raw_location);
 	if (HasScheme(normalized)) {
+		AddCandidate(candidates, seen, ToAbfss(normalized));
 		AddCandidate(candidates, seen, normalized);
 		AddCandidate(candidates, seen, ToHttps(normalized), true);
 		return candidates;
