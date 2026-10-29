@@ -3,6 +3,9 @@
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/main/database_manager.hpp"
+#include "duckdb/main/attached_database.hpp"
+#include "storage/onelake_catalog.hpp"
 #include "onelake_cached_scan.hpp"
 #include "onelake_cache_storage.hpp"
 
@@ -13,6 +16,7 @@ using namespace duckdb;
 
 namespace {
 struct Fixture {
+	shared_ptr<OneLakeCacheLifetime> lifetime;
 	idx_t opens = 0;
 	idx_t batches = 0;
 	idx_t version = 0;
@@ -88,10 +92,13 @@ private:
 
 class Source : public OneLakeScanSource {
 public:
-	explicit Source(shared_ptr<Fixture> fixture) : fixture(std::move(fixture)) {
+	explicit Source(shared_ptr<Fixture> fixture) : fixture(std::move(fixture)), lifetime(this->fixture->lifetime) {
 	}
 	string CacheKey() const override {
 		return "synthetic-test-source";
+	}
+	OneLakeCacheLifetime &Lifetime() const override {
+		return *lifetime;
 	}
 	void CheckIdentity(ClientContext &) override {
 		if (!fixture->granted) {
@@ -116,6 +123,7 @@ public:
 		return opened;
 	}
 	shared_ptr<Fixture> fixture;
+	shared_ptr<OneLakeCacheLifetime> lifetime;
 };
 
 struct Info : TableFunctionInfo {
@@ -208,18 +216,63 @@ void Benchmark(DuckDB &db, Fixture &fixture) {
 }
 } // namespace
 
+void TestCatalogRetirement() {
+	DBConfig config;
+	config.options.temporary_directory = "";
+	DuckDB db(nullptr, &config);
+	Connection connection(db);
+	Query(connection, "SET temp_directory=''");
+	Query(connection, "LOAD onelake");
+	Query(connection, "CREATE SECRET detach_test (TYPE ONELAKE, PROVIDER credential_chain, CHAIN 'env')");
+	Query(connection, "ATTACH '00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002' "
+	                  "AS retirement (TYPE ONELAKE, READ_CACHE 'PARQUET')");
+	// Keep the catalog alive after DETACH: cleanup must use the hook, not just destruction.
+	auto attached = DatabaseManager::Get(*db.instance).GetDatabase("retirement");
+	auto &catalog = static_cast<OneLakeCatalog &>(attached->GetCatalog());
+	auto fixture = make_shared_ptr<Fixture>();
+	fixture->lifetime = catalog.ReadCacheLifetime();
+	auto function = OneLakeCachedScanFunction();
+	function.name = "detach_fixture";
+	function.bind = Bind;
+	function.function_info = make_shared_ptr<Info>(make_shared_ptr<Source>(fixture));
+	ExtensionLoader loader(*db.instance, "detach_tests");
+	loader.RegisterFunction(std::move(function));
+	Query(connection, "PREPARE detached_scan AS SELECT sum(Price)::BIGINT FROM detach_fixture()");
+	Check(Scalar(connection, "EXECUTE detached_scan") == 33550336, "Attached synthetic source failed");
+	auto opens = fixture->opens;
+	Check(Scalar(connection, "EXECUTE detached_scan") == 33550336 && fixture->opens == opens,
+	      "Attached synthetic cache did not hit");
+	Query(connection, "DETACH retirement");
+	Check(connection.Query("EXECUTE detached_scan")->HasError() && fixture->opens == opens,
+	      "SQL DETACH left an old prepared cache usable while catalog was retained");
+	std::cout << "SQL DETACH retired cached prepared scans before catalog destruction\n";
+}
+
 void TestCachedScan(DuckDB &db) {
 	auto fixture = make_shared_ptr<Fixture>();
+	fixture->lifetime = make_shared_ptr<OneLakeCacheLifetime>(*db.instance);
 	auto function = OneLakeCachedScanFunction();
 	function.name = "cache_fixture";
 	function.bind = Bind;
-	function.function_info = make_shared_ptr<Info>(make_shared_ptr<Source>(fixture));
+	auto info = make_shared_ptr<Info>(make_shared_ptr<Source>(fixture));
+	function.function_info = info;
 	ExtensionLoader loader(*db.instance, "onelake_cache_tests");
 	loader.RegisterFunction(std::move(function));
 	RegisterOneLakeCacheOptimizer(*db.instance);
 	Connection connection(db);
 	Query(connection, "SET threads=2");
 	const string sum = "SELECT sum(Price)::BIGINT FROM cache_fixture()";
+	auto &manager = BufferManager::GetBufferManager(*db.instance);
+	auto directory = manager.GetTemporaryDirectory();
+	Check(OneLakeCacheDirectoryIsPrivate(directory), "Test requires an existing private spill directory");
+	Check(!OneLakeCacheDirectoryIsPrivate("relative-cache-directory"), "Relative directory was admitted");
+	Check(!OneLakeCacheDirectoryIsPrivate(directory + "\\missing"), "Missing directory was admitted");
+	Query(connection, "SET temp_directory='" + directory + "\\missing'");
+	auto admission_opens = fixture->opens;
+	Query(connection, sum);
+	Query(connection, sum);
+	Check(fixture->opens == admission_opens + 2, "Unverified spill directory reused or filled cache");
+	Query(connection, "SET temp_directory='" + directory + "'");
 	Check(Scalar(connection, sum) == 33550336, "Initial Arrow aggregate mismatch");
 	auto opens = fixture->opens;
 	Check(Scalar(connection, sum) == 33550336 && fixture->opens == opens, "Complete cache hit missed");
@@ -396,5 +449,38 @@ void TestCachedScan(DuckDB &db) {
 	Query(capacity, "SET max_temp_directory_size='64MB'");
 	fixture->rows = 8192;
 	Benchmark(db, *fixture);
+	auto other_fixture = make_shared_ptr<Fixture>();
+	other_fixture->lifetime = make_shared_ptr<OneLakeCacheLifetime>(*db.instance);
+	auto other_function = OneLakeCachedScanFunction();
+	other_function.name = "cache_other";
+	other_function.bind = Bind;
+	other_function.function_info = make_shared_ptr<Info>(make_shared_ptr<Source>(other_fixture));
+	loader.RegisterFunction(std::move(other_function));
+	Query(connection, "SELECT sum(Price) FROM cache_other()");
+	Query(connection, "SELECT sum(Price) FROM cache_other()");
+	auto other_opens = other_fixture->opens;
+	auto previous = Scalar(connection, sum);
+	Scalar(partial, sum);
+	Query(connection, "PREPARE retired AS SELECT sum(Price)::BIGINT FROM cache_fixture()");
+	auto used_before_retire = manager.GetUsedMemory();
+	fixture->lifetime->Retire();
+	Check(manager.GetUsedMemory() < used_before_retire, "Attachment retirement retained managed data");
+	Query(connection, "SELECT sum(Price) FROM cache_other()");
+	Check(other_fixture->opens == other_opens, "Retirement flushed an unrelated namespace");
+	opens = fixture->opens;
+	Check(connection.Query("EXECUTE retired")->HasError() && partial.Query(sum)->HasError() && fixture->opens == opens,
+	      "Retired attachment allowed a prepared or cross-connection scan");
+	// Use another connection's entry: a failing query intentionally clears its own cache.
+	Query(projection, "SELECT sum(Price) FROM cache_other()");
+	auto unrelated_opens = other_fixture->opens;
+	fixture->lifetime->Retire();
+	Query(projection, "SELECT sum(Price) FROM cache_other()");
+	Check(other_fixture->opens == unrelated_opens, "Retirement flushed an unrelated namespace");
+	fixture->lifetime = make_shared_ptr<OneLakeCacheLifetime>(*db.instance);
+	info->source = make_shared_ptr<Source>(fixture);
+	++fixture->version;
+	Check(Scalar(connection, sum) == previous + 819200000 && fixture->opens == opens + 1,
+	      "New attachment generation reused retired data");
+	Check(connection.Query("EXECUTE retired")->HasError(), "Old prepared statement adopted a new attachment");
 	std::cout << "Guarded hits, stale/denied/missing validation, partial coverage and no-replay failures passed\n";
 }

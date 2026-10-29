@@ -67,19 +67,25 @@ private:
 
 class LiveReadSource : public OneLakeScanSource {
 public:
-	LiveReadSource(OneLakeCatalog &catalog, TableReadTarget target) : catalog(catalog), target(std::move(target)) {
+	LiveReadSource(OneLakeCatalog &catalog, TableReadTarget target)
+	    : catalog(catalog), target(std::move(target)), lifetime(catalog.ReadCacheLifetime()) {
 	}
 	string CacheKey() const override {
-		string key = catalog.ReadCacheId();
+		string key;
 		for (auto &part : {target.origin, target.workspace, target.item, target.schema, target.table}) {
 			key += ":" + to_string(part.size()) + ":" + part;
 		}
 		return key;
 	}
 	void CheckIdentity(ClientContext &context) override {
+		lifetime->CheckActive();
 		OneLakeTableAPI::Token(context, catalog.GetCredentials());
 	}
+	OneLakeCacheLifetime &Lifetime() const override {
+		return *lifetime;
+	}
 	OneLakeOpenedRead Open(ClientContext &context, const vector<string> &columns) override {
+		CheckIdentity(context);
 		OneLakeOpenedRead result;
 		result.stream = make_uniq<TableReadStream>(context, catalog.GetCredentials(), target, columns);
 		// The deployed read allocation has no supported snapshot/authorization validator.
@@ -90,6 +96,7 @@ public:
 private:
 	OneLakeCatalog &catalog;
 	TableReadTarget target;
+	shared_ptr<OneLakeCacheLifetime> lifetime;
 };
 
 } // namespace

@@ -2,6 +2,7 @@
 #include "onelake_cache_storage.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
+#include "duckdb/common/types/uuid.hpp"
 #include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
 #include "duckdb/function/table/arrow.hpp"
 #include "duckdb/main/client_context_state.hpp"
@@ -24,18 +25,20 @@ namespace duckdb {
 namespace {
 
 struct Entry {
-	explicit Entry(ClientContext &context) : storage(OneLakeCacheStorage::Get(context)) {
+	explicit Entry(ClientContext &context)
+	    : storage(OneLakeCacheStorage::Get(context)), allocator(BufferAllocator::Get(context)), paths(allocator) {
 	}
 	~Entry() {
 		for (auto &path : paths) {
 			try {
-				storage->Remove(path);
+				storage->Remove(string(path.data(), path.size()));
 			} catch (...) {
 			}
 		}
 	}
 	shared_ptr<OneLakeCacheStorage> storage;
-	vector<string> paths;
+	Allocator &allocator;
+	OneLakeCachePaths paths;
 	std::function<bool(ClientContext &)> revalidate;
 	idx_t rows = 0;
 	bool complete = false;
@@ -43,8 +46,11 @@ struct Entry {
 };
 
 struct CacheState : ClientContextState {
+	explicit CacheState(ClientContext &context) : allocator(BufferAllocator::Get(context)), entries(allocator) {
+	}
+	Allocator &allocator;
 	mutex lock;
-	unordered_map<string, shared_ptr<Entry>> entries;
+	OneLakeCacheMap<shared_ptr<Entry>> entries;
 	shared_ptr<Entry> Get(const string &key) {
 		lock_guard<mutex> guard(lock);
 		auto found = entries.find(key);
@@ -52,7 +58,17 @@ struct CacheState : ClientContextState {
 	}
 	void Put(const string &key, shared_ptr<Entry> entry) {
 		lock_guard<mutex> guard(lock);
-		entries[key] = std::move(entry);
+		entries.insert_or_assign(CacheString(allocator, key), std::move(entry));
+	}
+	void EraseNamespace(const string &prefix) {
+		lock_guard<mutex> guard(lock);
+		for (auto it = entries.begin(); it != entries.end();) {
+			if (std::string_view(it->first.data(), it->first.size()).substr(0, prefix.size()) == prefix) {
+				it = entries.erase(it);
+			} else {
+				++it;
+			}
+		}
 	}
 	void Erase(const string &key, shared_ptr<Entry> expected = nullptr) {
 		lock_guard<mutex> guard(lock);
@@ -121,7 +137,8 @@ bool SameLayout(const ArrowSchema &a, const ArrowSchema &b) {
 bool Enabled(ClientContext &context, const BindData &data) {
 	Value setting;
 	return data.enabled && context.TryGetCurrentSetting("enable_external_file_cache", setting) &&
-	       setting.GetValue<bool>();
+	       setting.GetValue<bool>() &&
+	       OneLakeCacheDirectoryIsPrivate(BufferManager::GetBufferManager(context).GetTemporaryDirectory());
 }
 
 class TeeStream : public ArrowArrayStreamWrapper {
@@ -172,13 +189,13 @@ public:
 			if (!batch->arrow_array.release) {
 				if (entry->paths.empty()) {
 					OneLakeParquetFragment empty(context, table.GetNames(), table.GetTypes(), true);
-					entry->paths.push_back(empty.Finish());
+					Keep(empty);
 				}
 				entry->complete = true;
 			} else {
 				OneLakeParquetFragment fragment(context, table.GetNames(), table.GetTypes(), true);
 				fragment.AppendArrowBatch(batch, table);
-				entry->paths.push_back(fragment.Finish());
+				Keep(fragment);
 				entry->rows += idx_t(batch->arrow_array.length);
 			}
 		} catch (...) {
@@ -191,6 +208,15 @@ public:
 	}
 
 private:
+	void Keep(OneLakeParquetFragment &fragment) {
+		auto path = fragment.Finish();
+		try {
+			entry->paths.push_back(CacheString(entry->allocator, path));
+		} catch (...) {
+			entry->storage->Remove(path);
+			throw;
+		}
+	}
 	void Discard() {
 		if (entry) {
 			cache->Erase(key, entry);
@@ -245,9 +271,9 @@ void StartArrow(ClientContext &context, const BindData &data, GlobalState &state
 	if (projected == 0 && !SameLayout(*data.schema_root.arrow_schema.children[0], *actual.arrow_schema.children[0])) {
 		throw IOException("OneLake Arrow layout changed between binding and execution; rebind the query");
 	}
-	if (allow_fill && opened.revalidate) {
+	if (allow_fill && opened.revalidate && Enabled(context, data)) {
 		try {
-			auto entry = make_shared_ptr<Entry>(context);
+			auto entry = MakeCacheShared<Entry>(BufferAllocator::Get(context), context);
 			entry->revalidate = std::move(opened.revalidate);
 			state.cache->Put(state.key, entry);
 			auto tee = make_uniq<TeeStream>(context, opened.stream, entry, state.cache, state.key);
@@ -276,7 +302,7 @@ void StartParquet(ClientContext &context, const BindData &data, GlobalState &sta
 	state.function = catalog_entry.functions.GetFunctionByOffset(0);
 	vector<Value> paths;
 	for (auto &path : entry->paths) {
-		paths.emplace_back(path);
+		paths.emplace_back(string(path.data(), path.size()));
 	}
 	vector<Value> inputs {Value::LIST(LogicalType::VARCHAR, std::move(paths))};
 	named_parameter_map_t parameters;
@@ -321,19 +347,26 @@ void StartParquet(ClientContext &context, const BindData &data, GlobalState &sta
 
 unique_ptr<GlobalTableFunctionState> Init(ClientContext &context, TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<BindData>();
+	data.source->Lifetime().CheckActive();
 	data.source->CheckIdentity(context);
 	auto state = make_uniq<GlobalState>();
 	state->columns = input.column_ids;
-	state->cache = context.registered_state->GetOrCreate<CacheState>("onelake_read_cache");
-	state->key = data.source->CacheKey();
-	for (auto &name : Columns(data, state->columns)) {
-		state->key += ":" + to_string(name.size()) + ":" + name;
+	try {
+		state->cache = context.registered_state->GetOrCreate<CacheState>("onelake_read_cache", context);
+		state->key = data.source->Lifetime().Id() + ":" + data.source->CacheKey();
+		for (auto &name : Columns(data, state->columns)) {
+			state->key += ":" + to_string(name.size()) + ":" + name;
+		}
+	} catch (...) {
+		StartArrow(context, data, *state, false);
+		return std::move(state);
 	}
 	const auto enabled = Enabled(context, data);
 	auto entry = state->cache->Get(state->key);
 	if (entry) {
 		bool valid = false;
 		try {
+			data.source->Lifetime().Track(context);
 			valid =
 			    enabled && entry->available &&
 			    (entry->complete || (data.partial_limit.IsValid() && entry->rows >= data.partial_limit.GetIndex())) &&
@@ -473,6 +506,69 @@ void PartialLimit(OptimizerExtensionInput &, unique_ptr<LogicalOperator> &plan) 
 
 } // namespace
 
+struct OneLakeCacheLifetime::State {
+	explicit State(DatabaseInstance &db)
+	    : db(db), id(UUID::ToString(UUID::GenerateRandomUUID())), prefix(id + ":"), contexts(BufferAllocator::Get(db)) {
+	}
+	DatabaseInstance &db;
+	string id;
+	string prefix;
+	mutex lock;
+	atomic<bool> retired {false};
+	OneLakeCacheVector<weak_ptr<CacheState>> contexts;
+};
+
+OneLakeCacheLifetime::OneLakeCacheLifetime(DatabaseInstance &db) : state(make_uniq<State>(db)) {
+}
+
+OneLakeCacheLifetime::~OneLakeCacheLifetime() {
+	Retire();
+}
+
+const string &OneLakeCacheLifetime::Id() const {
+	return state->id;
+}
+
+void OneLakeCacheLifetime::CheckActive() const {
+	if (state->retired) {
+		throw IOException("OneLake cache attachment has been retired; rebind the query");
+	}
+}
+
+void OneLakeCacheLifetime::Track(ClientContext &context) {
+	if (context.db.get() != &state->db) {
+		throw IOException("OneLake cache attachment belongs to another database");
+	}
+	auto cache = context.registered_state->GetOrCreate<CacheState>("onelake_read_cache", context);
+	lock_guard<mutex> guard(state->lock);
+	CheckActive();
+	for (auto it = state->contexts.begin(); it != state->contexts.end();) {
+		auto existing = it->lock();
+		if (existing == cache) {
+			return;
+		}
+		if (!existing) {
+			it = state->contexts.erase(it);
+		} else {
+			++it;
+		}
+	}
+	state->contexts.emplace_back(cache);
+}
+
+void OneLakeCacheLifetime::Retire() {
+	lock_guard<mutex> guard(state->lock);
+	state->retired = true;
+	for (auto &reference : state->contexts) {
+		auto context = reference.lock();
+		if (context) {
+			context->EraseNamespace(state->prefix);
+		}
+	}
+	OneLakeCacheVector<weak_ptr<CacheState>> empty(state->contexts.get_allocator());
+	state->contexts.swap(empty);
+}
+
 TableFunction OneLakeCachedScanFunction() {
 	TableFunction function("onelake_table_scan", {}, Scan, nullptr, Init, InitLocal);
 	function.projection_pushdown = true;
@@ -484,6 +580,7 @@ TableFunction OneLakeCachedScanFunction() {
 
 unique_ptr<FunctionData> BindOneLakeCachedScan(ClientContext &context, shared_ptr<OneLakeScanSource> source,
                                                bool enabled, vector<string> &names, vector<LogicalType> &types) {
+	source->Lifetime().CheckActive();
 	auto data = make_uniq<BindData>(std::move(source), enabled);
 	auto probe = data->source->Open(context, {});
 	probe.stream->GetSchema(data->schema_root);

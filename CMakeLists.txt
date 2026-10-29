@@ -19,9 +19,12 @@ include_directories(src/include)
 
 option(ONELAKE_BUILD_CACHE_PROTOTYPE "Build the synthetic managed-cache storage test" OFF)
 if(ONELAKE_BUILD_CACHE_PROTOTYPE)
-  add_executable(onelake_cache_storage_test test/cache/storage_test.cpp test/cache/scan_test.cpp
-                 src/onelake_cache_storage.cpp src/onelake_cached_scan.cpp)
+  add_executable(onelake_cache_storage_test test/cache/storage_test.cpp test/cache/scan_test.cpp test/cache/directory_test.cpp
+                 src/onelake_cache_storage.cpp src/onelake_cached_scan.cpp src/onelake_cache_directory.cpp)
   target_link_libraries(onelake_cache_storage_test duckdb_static)
+  if(WIN32)
+    target_link_libraries(onelake_cache_storage_test Advapi32)
+  endif()
   set_property(TARGET onelake_cache_storage_test PROPERTY CXX_STANDARD 17)
 endif()
 
@@ -42,6 +45,7 @@ set(EXTENSION_SOURCES_COMMON
     src/onelake_table_api.cpp
     src/onelake_table_reader.cpp
     src/onelake_cache_storage.cpp
+    src/onelake_cache_directory.cpp
     src/onelake_cached_scan.cpp
     src/onelake_credentials.cpp
     src/onelake_secret.cpp
@@ -216,8 +220,8 @@ target_include_directories(
   PRIVATE OpenSSL::SSL OpenSSL::Crypto CURL::libcurl JsonCpp::JsonCpp Azure::azure-identity ${RUST_BUILD_DIR}/include ${READER_BUILD_DIR}/include)
 
 if(WIN32)
-  target_link_libraries(${EXTENSION_NAME} Userenv Ntdll)
-  target_link_libraries(${TARGET_NAME}_loadable_extension Userenv Ntdll)
+  target_link_libraries(${EXTENSION_NAME} Userenv Ntdll Advapi32)
+  target_link_libraries(${TARGET_NAME}_loadable_extension Userenv Ntdll Advapi32)
 endif()
 
 # Allow duplicate constexpr static symbols from catalog entry headers

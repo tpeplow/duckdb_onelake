@@ -17,7 +17,7 @@ namespace {
 
 constexpr const char *CACHE_STATE = "onelake_cache_storage";
 constexpr const char *CACHE_PREFIX = "onelake-cache://";
-thread_local const vector<string> *authorized_paths = nullptr;
+thread_local const OneLakeCachePaths *authorized_paths = nullptr;
 
 class CacheHandle : public FileHandle {
 public:
@@ -61,8 +61,12 @@ public:
 			throw IOException("OneLake cache entry is not sealed");
 		} else if (file->Guarded() &&
 		           (!authorized_paths ||
-		            std::find(authorized_paths->begin(), authorized_paths->end(), path) == authorized_paths->end())) {
+		            std::none_of(authorized_paths->begin(), authorized_paths->end(),
+		                         [&](const OneLakeCacheString &candidate) { return candidate == path.c_str(); }))) {
 			throw IOException("OneLake cache reads require a revalidated scan");
+		}
+		if (flags.OpenForReading()) {
+			file->was_read = true;
 		}
 		return make_uniq<CacheHandle>(*this, path, flags, std::move(file));
 	}
@@ -154,11 +158,11 @@ void InvalidateRanges(DatabaseInstance &db, const string &path) {
 
 } // namespace
 
-OneLakeCachedFile::OneLakeCachedFile(BufferManager &manager, bool guarded) : guarded(guarded), manager(manager) {
+OneLakeCachedFile::OneLakeCachedFile(BufferManager &manager, bool guarded)
+    : guarded(guarded), manager(manager), blocks(manager.GetBufferAllocator()) {
 }
 
 OneLakeCachedFile::~OneLakeCachedFile() {
-	manager.FreeReservedMemory(reserved);
 }
 
 void OneLakeCachedFile::OpenWriter() {
@@ -181,16 +185,7 @@ void OneLakeCachedFile::Append(const_data_ptr_t data, idx_t count) {
 			if (offset == 0) {
 				if (blocks.size() == blocks.capacity()) {
 					const auto capacity = MaxValue<idx_t>(1, blocks.capacity() * 2);
-					const auto allocation = capacity * sizeof(shared_ptr<BlockHandle>);
-					manager.ReserveMemory(allocation);
-					try {
-						blocks.reserve(capacity);
-					} catch (...) {
-						manager.FreeReservedMemory(allocation);
-						throw;
-					}
-					manager.FreeReservedMemory(reserved);
-					reserved = allocation;
+					blocks.reserve(capacity);
 				}
 				auto block = manager.Allocate(MemoryTag::EXTENSION, block_size, false);
 				blocks.push_back(block.GetBlockHandle());
@@ -243,7 +238,8 @@ bool OneLakeCachedFile::Sealed() {
 	return sealed && !failed;
 }
 
-OneLakeCacheStorage::OneLakeCacheStorage(ClientContext &context) : db(*context.db) {
+OneLakeCacheStorage::OneLakeCacheStorage(ClientContext &context)
+    : db(*context.db), allocator(BufferAllocator::Get(context)), files(allocator) {
 }
 
 OneLakeCacheStorage::~OneLakeCacheStorage() {
@@ -260,9 +256,9 @@ shared_ptr<OneLakeCacheStorage> OneLakeCacheStorage::Get(ClientContext &context)
 
 string OneLakeCacheStorage::Create(bool guarded) {
 	auto path = string(CACHE_PREFIX) + UUID::ToString(UUID::GenerateRandomUUID()) + ".parquet";
-	auto file = make_shared_ptr<OneLakeCachedFile>(BufferManager::GetBufferManager(db), guarded);
+	auto file = MakeCacheShared<OneLakeCachedFile>(allocator, BufferManager::GetBufferManager(db), guarded);
 	lock_guard<mutex> guard(lock);
-	files.emplace(path, std::move(file));
+	files.emplace(CacheString(allocator, path), std::move(file));
 	return path;
 }
 
@@ -281,21 +277,38 @@ void OneLakeCacheStorage::Seal(const string &path) {
 }
 
 void OneLakeCacheStorage::Remove(const string &path) {
+	bool invalidate = false;
 	{
 		lock_guard<mutex> guard(lock);
-		files.erase(path);
+		auto found = files.find(path);
+		if (found != files.end()) {
+			invalidate = found->second->was_read;
+			files.erase(found);
+		}
 	}
-	InvalidateRanges(db, path);
+	if (invalidate) {
+		InvalidateRanges(db, path);
+	}
 }
 
 void OneLakeCacheStorage::Clear() {
-	unordered_map<string, shared_ptr<OneLakeCachedFile>> removed;
-	{
-		lock_guard<mutex> guard(lock);
-		removed.swap(files);
-	}
-	for (auto &entry : removed) {
-		InvalidateRanges(db, entry.first);
+	// Do not allocate another managed map when clearing at the memory limit.
+	while (true) {
+		string path;
+		bool invalidate;
+		{
+			lock_guard<mutex> guard(lock);
+			if (files.empty()) {
+				return;
+			}
+			auto entry = files.begin();
+			path.assign(entry->first.data(), entry->first.size());
+			invalidate = entry->second->was_read;
+			files.erase(entry);
+		}
+		if (invalidate) {
+			InvalidateRanges(db, path);
+		}
 	}
 }
 
@@ -303,7 +316,7 @@ void RegisterOneLakeCacheStorage(DatabaseInstance &db) {
 	FileSystem::GetFileSystem(db).RegisterSubSystem(make_uniq<CacheFileSystem>());
 }
 
-OneLakeCacheReadScope::OneLakeCacheReadScope(const vector<string> *paths) : previous(authorized_paths) {
+OneLakeCacheReadScope::OneLakeCacheReadScope(const OneLakeCachePaths *paths) : previous(authorized_paths) {
 	authorized_paths = paths;
 }
 
