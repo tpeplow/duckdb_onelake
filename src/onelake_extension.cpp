@@ -1,6 +1,7 @@
 #include "onelake_extension.hpp"
 #include "storage/onelake_storage_extension.hpp"
 #include "onelake_secret.hpp"
+#include "onelake_cache_storage.hpp"
 #ifdef DUCKDB_BUILD_LOADABLE_EXTENSION
 #include "onelake_parser_extension.hpp"
 #endif
@@ -13,6 +14,7 @@ namespace duckdb {
 
 static void LoadInternal(ExtensionLoader &loader) {
 	RegisterOneLakeSecret(loader);
+	RegisterOneLakeCacheStorage(loader.GetDatabaseInstance());
 
 	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
 	if (config.extension_parameters.find(ONELAKE_ENV_FABRIC_TOKEN_OPTION) == config.extension_parameters.end()) {

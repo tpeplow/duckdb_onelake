@@ -17,6 +17,13 @@ endif()
 project(${TARGET_NAME})
 include_directories(src/include)
 
+option(ONELAKE_BUILD_CACHE_PROTOTYPE "Build the synthetic managed-cache storage test" OFF)
+if(ONELAKE_BUILD_CACHE_PROTOTYPE)
+  add_executable(onelake_cache_storage_test test/cache/storage_test.cpp src/onelake_cache_storage.cpp)
+  target_link_libraries(onelake_cache_storage_test duckdb_static)
+  set_property(TARGET onelake_cache_storage_test PROPERTY CXX_STANDARD 17)
+endif()
+
 # DuckDB's extension distribution supports vcpkg. As such, dependencies can be added in ./vcpkg.json and then
 # used in cmake with find_package. Feel free to remove or replace with other dependencies.
 # Note that it should also be removed from vcpkg.json to prevent needlessly installing it..
@@ -33,6 +40,7 @@ set(EXTENSION_SOURCES_COMMON
     src/onelake_api.cpp
     src/onelake_table_api.cpp
     src/onelake_table_reader.cpp
+    src/onelake_cache_storage.cpp
     src/onelake_credentials.cpp
     src/onelake_secret.cpp
     src/onelake_catalog.cpp

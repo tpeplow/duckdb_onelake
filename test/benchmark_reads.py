@@ -27,7 +27,11 @@ def parse_runs(stdout):
         if not timer:
             raise ValueError("Missing query timing")
         runs.append(
-            {"iteration": int(match.group(1)), "seconds": float(timer[1]), "result": result}
+            {
+                "iteration": int(match.group(1)),
+                "seconds": float(timer[1]),
+                "result": result,
+            }
         )
     return runs
 
@@ -42,7 +46,9 @@ def main():
     parser.add_argument("--table", required=True)
     parser.add_argument("--column", default="Price")
     parser.add_argument("--repeats", type=int, default=3)
-    parser.add_argument("--external-file-cache", choices=["true", "false"], default="false")
+    parser.add_argument(
+        "--external-file-cache", choices=["true", "false"], default="false"
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.repeats < 1:
@@ -122,14 +128,18 @@ def main():
             )
             # Do not persist service errors, tokens, raw output or environment variables.
             if result.returncode:
-                raise RuntimeError(f"{mode}/{case} failed with exit code {result.returncode}")
+                raise RuntimeError(
+                    f"{mode}/{case} failed with exit code {result.returncode}"
+                )
             runs = parse_runs(result.stdout)
             if len(runs) != args.repeats:
                 raise RuntimeError("Incomplete benchmark output")
             for run in runs:
                 reference = references.setdefault(case, run["result"])
                 if run["result"] != reference:
-                    raise RuntimeError(f"Result mismatch for {mode}/{case}; source may have changed")
+                    raise RuntimeError(
+                        f"Result mismatch for {mode}/{case}; source may have changed"
+                    )
             report["experiments"].append(
                 {
                     "mode": mode,
@@ -139,7 +149,9 @@ def main():
                     "runs": runs,
                 }
             )
-            args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+            args.output.write_text(
+                json.dumps(report, indent=2) + "\n", encoding="utf-8"
+            )
             print([run["seconds"] for run in runs], flush=True)
     report["equivalent"] = True
     args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")

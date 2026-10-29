@@ -10,6 +10,51 @@ or
 make test_debug
 ```
 
+## Read-mode benchmark
+
+`benchmark_reads.py` compares TABLE_API and DIRECT_FILES using the native shell.
+It requires Python's standard library, an explicitly approved Lakehouse table,
+and in-memory `AZURE_STORAGE_TOKEN` and `FABRIC_API_TOKEN` for the same caller.
+The default workloads expect a numeric Price column; `--column` selects another.
+They include full scans and allocate billed read sessions. Do not run against
+an unapproved target. No data or permissions are changed.
+
+```powershell
+python test\benchmark_reads.py --approved-live-read `
+  --shell build\release\duckdb.exe --workspace <workspace-guid> --item <item-guid> `
+  --schema HousePrices --table PricePaid --external-file-cache false `
+  --output <new-report-path.json>
+```
+
+The default disables DuckDB's external-file cache in both modes. Each workload
+uses a fresh process, alternating mode order, with three queries per process.
+The harness checks aggregate result equality across repetitions and modes and
+refuses to overwrite reports. It records source revision, individual timings
+and configuration, not tokens or raw service output. First-use is not genuinely
+cold: OS/service caches are not flushed. The `impossible` workload's threshold
+is only impossible when the selected data's maximum is at most one billion.
+Wall time includes SQL binding/execution; no Rust wire-byte or per-query memory
+measurement is implied. Keep generated reports outside the repository.
+
+## Managed-cache storage prototype
+
+Configure with `-DONELAKE_BUILD_CACHE_PROTOTYPE=ON` and build the
+`onelake_cache_storage_test` target. Run it with a new private temporary-directory
+path as its sole argument. It uses synthetic data only: no Fabric access,
+tokens or authorization mocks are required. The executable exercises native
+Parquet COPY/read and incremental Arrow-batch encoding over buffer-managed
+virtual files, preserving the caller's batch ownership and surplus rows.
+It covers cross-connection isolation, external-file range invalidation without
+flushing unrelated entries, spill limits and cleanup. Native file validity is
+not a source-completeness or authorization proof.
+
+This is not a reusable TABLE_API cache yet. No live Arrow data is retained, no
+new SQL cache setting is enabled, and ordinary OneLake reads remain unchanged.
+The prototype uses DuckDB's existing Parquet writer rather than adding a second
+encoder with independently allocated row-group/compression buffers. Working
+storage tests do not establish the missing source/authorization validator or
+complete the remaining memory/privacy and guarded-scan integration gates.
+
 ## Rust table reader
 
 ATTACH defaults to the secured reader. The explicit `DIRECT_FILES` mode retains
