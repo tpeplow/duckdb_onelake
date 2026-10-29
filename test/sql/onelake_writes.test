@@ -38,7 +38,7 @@ CREATE SECRET onelake_test (
 # Attach test lakehouse
 statement ok
 ATTACH '${TEST_WORKSPACE}/${TEST_LAKEHOUSE}.Lakehouse' 
-    AS test_db (TYPE ONELAKE);
+    AS test_db (TYPE ONELAKE, READ_MODE 'DIRECT_FILES');
 
 # ============================================================================
 # Phase 0: Basic INSERT Operations (Currently Working)

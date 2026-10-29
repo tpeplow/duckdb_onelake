@@ -1,0 +1,67 @@
+# name: test/sql/onelake_table_api_live.test
+# description: Opt-in secured reads of an approved PricePaid-compatible table
+# group: [sql]
+
+require onelake
+
+require-env ONELAKE_LIVE_READ_APPROVED true
+
+require-env ONELAKE_TEST_WORKSPACE
+
+require-env ONELAKE_TEST_ITEM
+
+require-env ONELAKE_TEST_SCHEMA
+
+require-env ONELAKE_TEST_TABLE
+
+require-env ONELAKE_TEST_PROVIDER
+
+statement ok
+CREATE SECRET live_reader (TYPE ONELAKE, PROVIDER credential_chain, CHAIN '${ONELAKE_TEST_PROVIDER}');
+
+statement ok
+ATTACH '${ONELAKE_TEST_WORKSPACE}/${ONELAKE_TEST_ITEM}' AS live_read (TYPE ONELAKE, READ_ONLY);
+
+statement ok
+PREPARE read_sample AS SELECT COUNT(*) FROM (SELECT Price FROM live_read."${ONELAKE_TEST_SCHEMA}"."${ONELAKE_TEST_TABLE}" LIMIT 10);
+
+query I
+EXECUTE read_sample;
+----
+10
+
+query I
+EXECUTE read_sample;
+----
+10
+
+# No physical column is required by DuckDB here, but OneLake must still authorize the rows.
+query I
+SELECT COUNT(*) FROM (SELECT 1 FROM live_read."${ONELAKE_TEST_SCHEMA}"."${ONELAKE_TEST_TABLE}" LIMIT 10);
+----
+10
+
+query III
+WITH sample AS MATERIALIZED (
+    SELECT Price, PropertyType, DateOfTransfer FROM live_read."${ONELAKE_TEST_SCHEMA}"."${ONELAKE_TEST_TABLE}" LIMIT 10
+)
+SELECT COUNT(*) = 10, COUNT(PropertyType) <= 10, MAX(DateOfTransfer) IS NOT NULL FROM sample WHERE Price > 0;
+----
+true	true	true
+
+query I
+WITH sample AS MATERIALIZED (
+    SELECT Price FROM live_read."${ONELAKE_TEST_SCHEMA}"."${ONELAKE_TEST_TABLE}" LIMIT 10
+)
+SELECT COUNT(*) >= 10 FROM sample a JOIN sample b ON a.Price = b.Price;
+----
+true
+
+statement ok
+DEALLOCATE read_sample;
+
+statement ok
+DETACH live_read;
+
+statement ok
+DROP SECRET live_reader;

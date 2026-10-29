@@ -1,4 +1,5 @@
 #include "onelake_api.hpp"
+#include "onelake_table_api.hpp"
 #include "onelake_delta_writer.hpp"
 #include "onelake_logging.hpp"
 #include "storage/onelake_catalog.hpp"
@@ -312,6 +313,17 @@ void OneLakeTableSet::LoadEntries(ClientContext &context) {
 	if (!schema.schema_data) {
 		throw InternalException("Schema data not available for OneLake schema");
 	}
+	if (onelake_catalog.UsesTableAPI()) {
+		for (const auto &name :
+		     OneLakeTableAPI::Tables(context, *schema.schema_data, schema.name, onelake_catalog.GetCredentials())) {
+			CreateTableInfo info;
+			info.table = name;
+			auto entry = make_uniq<OneLakeTableEntry>(catalog, schema, info);
+			entry->table_data->schema_name = schema.name;
+			CreateEntry(std::move(entry));
+		}
+		return;
+	}
 
 	// Printer::Print(StringUtil::Format("[onelake] loading tables for lakehouse '%s'", schema.schema_data->name));
 
@@ -399,6 +411,10 @@ bool OneLakeTableSet::ShouldRefreshForMissingTable(ClientContext &context, const
 }
 
 void OneLakeTableSet::EnsureFresh(ClientContext &context) {
+	if (catalog.Cast<OneLakeCatalog>().UsesTableAPI()) {
+		EnsureLoaded(context);
+		return;
+	}
 	transaction_t active_query_id = MAXIMUM_QUERY_ID;
 	if (context.transaction.HasActiveTransaction()) {
 		active_query_id = context.transaction.GetActiveQuery();

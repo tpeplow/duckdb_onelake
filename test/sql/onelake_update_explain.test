@@ -21,7 +21,7 @@ CREATE SECRET onelake_fake (
 # If ATTACH fails, we can't test UPDATE planning.
 # But based on the code, it seems lazy.
 statement ok
-ATTACH 'workspace/lakehouse.Lakehouse' AS onelake_db (TYPE ONELAKE);
+ATTACH 'workspace/lakehouse.Lakehouse' AS onelake_db (TYPE ONELAKE, READ_MODE 'DIRECT_FILES');
 
 statement ok
 USE onelake_db.default;

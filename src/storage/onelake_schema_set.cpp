@@ -2,6 +2,7 @@
 #include "storage/onelake_catalog.hpp"
 #include "storage/onelake_schema_entry.hpp"
 #include "onelake_api.hpp"
+#include "onelake_table_api.hpp"
 #include "storage/onelake_transaction.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/catalog/catalog.hpp"
@@ -78,6 +79,22 @@ static bool LakehouseMatchesPreference(const OneLakeLakehouse &lakehouse, const 
 
 void OneLakeSchemaSet::LoadEntries(ClientContext &context) {
 	auto &onelake_catalog = catalog.Cast<OneLakeCatalog>();
+	if (onelake_catalog.UsesTableAPI()) {
+		auto item = OneLakeTableAPI::ResolveItem(context, onelake_catalog.GetWorkspaceId(),
+		                                         onelake_catalog.GetConfiguredDefaultPreference(),
+		                                         onelake_catalog.GetCredentials());
+		for (const auto &name : OneLakeTableAPI::Schemas(context, item, onelake_catalog.GetCredentials())) {
+			CreateSchemaInfo info;
+			info.schema = name;
+			auto entry = make_uniq<OneLakeSchemaEntry>(catalog, info);
+			entry->schema_data = make_uniq<OneLakeLakehouse>(item);
+			CreateEntry(std::move(entry));
+			if (!onelake_catalog.HasDefaultSchema() || name == "dbo") {
+				onelake_catalog.SetDefaultSchema(name);
+			}
+		}
+		return;
+	}
 	auto lakehouses =
 	    OneLakeAPI::GetLakehouses(context, onelake_catalog.GetWorkspaceId(), onelake_catalog.GetCredentials());
 	const bool has_configured_default = onelake_catalog.HasUserConfiguredDefault();

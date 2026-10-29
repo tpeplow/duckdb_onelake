@@ -31,6 +31,8 @@ set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 set(EXTENSION_SOURCES_COMMON
     src/onelake_extension.cpp
     src/onelake_api.cpp
+    src/onelake_table_api.cpp
+    src/onelake_table_reader.cpp
     src/onelake_credentials.cpp
     src/onelake_secret.cpp
     src/onelake_catalog.cpp

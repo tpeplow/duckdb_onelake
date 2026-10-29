@@ -8,6 +8,52 @@ This extension, Onelake, allow you to connect DuckDB to OneLake workspaces and l
 
 DISCLAIMER: Currently, this extension is in an experimental phase..
 
+## Secured reads (preview)
+
+`ATTACH` now defaults to `READ_MODE 'TABLE_API'`. It discovers the selected item's
+OneLake catalog and reads caller-authorized Arrow data without Delta/DFS scan
+fallback. GUIDs avoid requiring Fabric item-list permissions:
+
+```sql
+CREATE SECRET onelake_read (TYPE ONELAKE, PROVIDER credential_chain, CHAIN 'cli');
+ATTACH '<workspace-id>/<item-id>' AS lake (TYPE ONELAKE, READ_ONLY);
+SELECT * FROM lake.dbo.example LIMIT 10;
+
+-- Explicit compatibility mode for the existing file-based path:
+ATTACH '<workspace-id>/<item-id>' AS legacy
+    (TYPE ONELAKE, READ_MODE 'DIRECT_FILES');
+```
+
+TABLE_API attachments are currently read-only. Independent write authorization
+and full writer-schema handling are not implemented yet; CREATE, INSERT, UPDATE,
+DELETE, ALTER and DROP are rejected in this mode. Existing file writes remain
+available only through explicit DIRECT_FILES attachments, with their existing
+limitations and service permissions. Legacy mode is not a permission bypass.
+
+Schema binding allocates a read session with the column option omitted, reads its
+Arrow schema, and closes it without consuming rows. Execution allocates a fresh
+session with the required columns. Binding therefore incurs additional billed
+`POST /read` operations, including for metadata-only queries; prepared statements
+retain their bound schema, not a read session. A changed projected schema fails
+execution rather than silently converting against stale metadata.
+
+Projection is pushed to OneLake; filters, joins, aggregates and LIMIT execute in
+DuckDB. COUNT(*) reads authorized rows rather than using catalog row counts.
+Streams run sequentially and all must finish for a complete result. LIMIT can
+stop early, although the service may return a large batch first. Bind/execution
+are separate snapshots; there is no cross-query snapshot guarantee.
+
+The attachment pins the token's tenant/object identity. `CHAIN 'cli'` uses only
+Azure CLI; `CHAIN 'env'` rereads the configured token variable; ordered chains
+respect the configured order. Acquire Storage tokens for `https://storage.azure.com`
+without a trailing slash. CLI/service-principal tokens refresh before new
+requests; an in-progress Rust read does not renew tokens or retry after failures.
+Switch identities by detaching and reattaching. Reattach after catalog/schema
+changes; TABLE_API does not automatically discard entries used by prepared queries.
+
+See [reader test instructions and limits](test/README.md). Live RLS/CLS policy
+matrices, native Iceberg fixtures and non-Windows builds remain release gates.
+
 ## Features
 - Authentication using:
     - Azure service principal credentials (or Fabric Workspace Managed Identity).
@@ -16,7 +62,7 @@ DISCLAIMER: Currently, this extension is in an experimental phase..
 - Connect to OneLake workspaces and lakehouses, including multiple lakehouses per workspace.
 - Set a default `lakehouse.schema` for queries and auto-discover tables lazily.
 - Query both Delta and Iceberg tables stored in OneLake lakehouses with standard SQL (Iceberg remains read-only).
-- Delta write operations with the bundled Rust writer:
+- Delta write operations with the bundled Rust writer in explicit DIRECT_FILES mode:
     - `INSERT` pipelines with configurable modes (`append`, `overwrite`, `error_if_exists`, `ignore`).
     - Physical `CREATE TABLE` statements that materialize Delta metadata and paths.
     - Guarded `DROP TABLE`, `DELETE`, and `UPDATE` support (no `RETURNING`) with predicate pushdown.
@@ -87,7 +133,7 @@ CREATE SECRET onelake (
 -- Required format: workspace-name/lakehouse-name.Lakehouse
 ATTACH '<your_workspace_name>/<your_lakehouse_name>.Lakehouse'
     AS <your_connection_name>
-    (TYPE ONELAKE);
+    (TYPE ONELAKE, READ_MODE 'DIRECT_FILES');
 
 USE <your_connection_name>.<schema_name>;
 

@@ -1,5 +1,13 @@
 # DuckDB OneLake Extension Documentation
 
+> **Read-mode migration:** ATTACH now defaults to the preview secured `TABLE_API`
+> path. See [Secured reads](README.md#secured-reads-preview) for its authentication,
+> schema-binding cost, projection, caching and failure semantics. The file-scan
+> diagrams, format overrides and write examples below describe the legacy
+> `READ_MODE 'DIRECT_FILES'` path, not the new default. TABLE_API rejects writes
+> until independent write authorization and complete writer-schema handling are
+> implemented. A successful secured read never authorizes a file write.
+
 ## Table of Contents
 - [Overview](#overview)
 - [Architecture](#architecture)
@@ -305,7 +313,7 @@ The attachment process establishes the connection between DuckDB and a specific 
 -- Required format: workspace-name/lakehouse-name.Lakehouse
 ATTACH 'workspace-name/lakehouse-name.Lakehouse' 
     AS my_onelake 
-    (TYPE ONELAKE);
+    (TYPE ONELAKE, READ_MODE 'DIRECT_FILES');
 ```
 
 ### Attachment Flow

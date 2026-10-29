@@ -30,6 +30,7 @@ protected:
 	Catalog &catalog;
 
 private:
+	mutable mutex load_lock;
 	mutex entry_lock;
 	case_insensitive_map_t<unique_ptr<CatalogEntry>> entries;
 	bool is_loaded;

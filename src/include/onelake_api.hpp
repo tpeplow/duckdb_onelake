@@ -98,7 +98,8 @@ public:
 	/// @param audience The target audience for the token (Fabric or DFS).
 	/// @return The access token string.
 	static string GetAccessToken(OneLakeCredentials &credentials,
-	                             OneLakeTokenAudience audience = OneLakeTokenAudience::Fabric);
+	                             OneLakeTokenAudience audience = OneLakeTokenAudience::Fabric,
+	                             ClientContext *context = nullptr);
 
 	/// @brief Drops a Unity Catalog-backed Delta table from Fabric catalog (not storage).
 	/// @param context The client context.

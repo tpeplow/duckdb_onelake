@@ -2,6 +2,8 @@
 #include "duckdb.hpp"
 #include <unordered_map>
 #include <vector>
+#include <memory>
+#include <mutex>
 
 namespace duckdb {
 
@@ -20,6 +22,8 @@ struct OneLakeCredentials {
 		timestamp_t expiry;
 	};
 	std::unordered_map<string, TokenCacheEntry> token_cache;
+	std::shared_ptr<std::mutex> token_mutex = std::make_shared<std::mutex>();
+	string principal_key;
 
 	bool IsValid() const;
 };
