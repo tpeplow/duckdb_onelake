@@ -1,5 +1,5 @@
 # name: test/sql/onelake_read_modes.test
-# description: Validate secured read modes before authentication or file discovery
+# description: Validate direct-file defaults and explicit secured modes before discovery
 # group: [sql]
 
 require onelake
@@ -11,6 +11,12 @@ READ_CACHE must be OFF or PARQUET
 
 statement error
 ATTACH '00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002' AS invalid_cache (TYPE ONELAKE, READ_CACHE 'PARQUET', READ_MODE 'DIRECT_FILES');
+----
+READ_CACHE PARQUET requires READ_MODE TABLE_API
+
+# READ_CACHE must not implicitly switch the default direct-file reader to Arrow.
+statement error
+ATTACH '00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002' AS invalid_cache (TYPE ONELAKE, READ_CACHE 'PARQUET');
 ----
 READ_CACHE PARQUET requires READ_MODE TABLE_API
 
@@ -29,14 +35,25 @@ CREATE SECRET read_modes_secret (TYPE ONELAKE, PROVIDER credential_chain, CHAIN 
 
 # GUID attachment is lazy and does not contact the service.
 statement ok
-ATTACH '00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002' AS secured_default (TYPE ONELAKE);
+ATTACH '00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002' AS files_default (TYPE ONELAKE, READ_ONLY);
+
+statement error
+CREATE SCHEMA files_default.blocked;
+----
+read-only mode
+
+statement ok
+DETACH files_default;
+
+statement ok
+ATTACH '00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002' AS secured_explicit (TYPE ONELAKE, READ_MODE 'table_api', READ_ONLY);
 
 statement ok
 SET VARIABLE AZURE_STORAGE_TOKEN = 'not-a-token';
 
 # The explicit env provider must neither switch to CLI nor fall back to file discovery.
 statement error
-SELECT * FROM secured_default.dbo.unavailable;
+SELECT * FROM secured_explicit.dbo.unavailable;
 ----
 A caller Entra token is required
 
@@ -44,16 +61,10 @@ statement ok
 RESET VARIABLE AZURE_STORAGE_TOKEN;
 
 statement ok
-DETACH secured_default;
-
-statement ok
-ATTACH '00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002' AS secured_explicit (TYPE ONELAKE, READ_MODE 'table_api', READ_ONLY);
-
-statement ok
 DETACH secured_explicit;
 
 statement ok
-ATTACH '00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002' AS cached_request (TYPE ONELAKE, READ_CACHE 'parquet');
+ATTACH '00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002' AS cached_request (TYPE ONELAKE, READ_MODE 'TABLE_API', READ_CACHE 'parquet');
 
 statement ok
 DETACH cached_request;

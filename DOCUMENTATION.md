@@ -1,10 +1,12 @@
 # DuckDB OneLake Extension Documentation
 
-> **Read-mode migration:** ATTACH now defaults to the preview secured `TABLE_API`
-> path. See [Secured reads](README.md#secured-reads-preview) for its authentication,
-> schema-binding cost, projection, caching and failure semantics. The file-scan
-> diagrams, format overrides and write examples below describe the legacy
-> `READ_MODE 'DIRECT_FILES'` path, not the new default. TABLE_API rejects writes
+> **Read-mode migration:** ATTACH defaults to `DIRECT_FILES`, the Delta/Iceberg-aware
+> direct Parquet path described by the file-scan diagrams and write examples below.
+> Explicitly select `READ_MODE 'TABLE_API'` for OneLake RLS/CLS through secured Arrow
+> reads. There is no automatic security detection or fallback between modes.
+> See [Read modes](README.md#read-modes) for examples and migration guidance, and
+> [Secured reads](README.md#secured-reads-preview) for schema-binding cost,
+> projection, caching and failure semantics. TABLE_API rejects writes
 > until independent write authorization and complete writer-schema handling are
 > implemented. A successful secured read never authorizes a file write.
 

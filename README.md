@@ -8,27 +8,77 @@ This extension, Onelake, allow you to connect DuckDB to OneLake workspaces and l
 
 DISCLAIMER: Currently, this extension is in an experimental phase..
 
-## Secured reads (preview)
+## Read modes
 
-`ATTACH` now defaults to `READ_MODE 'TABLE_API'`. It discovers the selected item's
-OneLake catalog and reads caller-authorized Arrow data without Delta/DFS scan
-fallback. GUIDs avoid requiring Fabric item-list permissions:
+`ATTACH` defaults to `READ_MODE 'DIRECT_FILES'`: DuckDB reads the source Parquet
+files through the existing Delta/Iceberg-aware reader. It respects table
+transaction metadata rather than scanning a raw file glob. Parquet metadata
+pruning, footer-based aggregates and DuckDB's file cache can improve performance;
+the faster mode still depends on the query and cache state.
+
+**For OneLake row-level security (RLS) or column-level security (CLS), explicitly select
+`READ_MODE 'TABLE_API'`.** The extension does not detect security constraints or
+automatically switch between modes, including after an access error. Direct-file
+reads require the caller's storage permissions and are not a permission bypass;
+this reader does not apply RLS/CLS rules locally.
+
+**Migration:** if you previously omitted READ_MODE to use secured Arrow reads,
+add `READ_MODE 'TABLE_API'` to your ATTACH statements. Mode selection is fixed for
+an attachment; detach and reattach to change it.
+
+### Direct Parquet reads (default)
+
+After [loading the extension](#running-the-extension), sign in with `az login`.
+Configure OneLake catalog authentication and Azure file authentication for the
+same identity:
 
 ```sql
+LOAD azure;
 CREATE SECRET onelake_read (TYPE ONELAKE, PROVIDER credential_chain, CHAIN 'cli');
-ATTACH '<workspace-id>/<item-id>' AS lake (TYPE ONELAKE, READ_ONLY);
-SELECT * FROM lake.dbo.example LIMIT 10;
+CREATE SECRET onelake_files (TYPE azure, PROVIDER credential_chain, CHAIN 'cli');
 
--- Explicit compatibility mode for the existing file-based path:
-ATTACH '<workspace-id>/<item-id>' AS legacy
-    (TYPE ONELAKE, READ_MODE 'DIRECT_FILES');
+-- Omitted READ_MODE uses direct Parquet reads.
+ATTACH '<workspace-id>/<item-id>' AS lake (TYPE ONELAKE, READ_ONLY);
+SELECT Price FROM lake.dbo.example LIMIT 10;
+
+-- The explicit equivalent:
+ATTACH '<workspace-id>/<item-id>' AS files
+    (TYPE ONELAKE, READ_MODE 'DIRECT_FILES', READ_ONLY);
+SELECT Price FROM files.dbo.example LIMIT 10;
 ```
+
+Replace the identifiers, schema, table and `Price` column with your target. Direct-file discovery
+supports lakehouse items; it does not enumerate `MirroredDatabase` items.
+
+## Secured reads (preview)
+
+Opt into the OneLake Table API to read caller-authorized Arrow data. It discovers
+the selected item's OneLake catalog without falling back to Delta/DFS scans.
+With the OneLake secret above, use:
+
+```sql
+ATTACH '<workspace-id>/<item-id>' AS secured
+    (TYPE ONELAKE, READ_MODE 'TABLE_API', READ_ONLY);
+SELECT Price FROM secured.dbo.example LIMIT 10;
+```
+
+For this mode, GUIDs avoid requiring Fabric item-list permissions, and the Azure
+file secret is not needed. OneLake applies the caller's effective permissions;
+an elevated identity may still see unrestricted data.
 
 TABLE_API attachments are currently read-only. Independent write authorization
 and full writer-schema handling are not implemented yet; CREATE, INSERT, UPDATE,
 DELETE, ALTER and DROP are rejected in this mode. Existing file writes remain
-available only through explicit DIRECT_FILES attachments, with their existing
-limitations and service permissions. Legacy mode is not a permission bypass.
+available through DIRECT_FILES attachments (including the default) without
+READ_ONLY, subject to their existing limitations, service permissions and
+destructive-operation guards. The read-mode examples above use READ_ONLY to block writes.
+
+`READ_CACHE 'PARQUET'` is a separate, experimental cache of authorized Arrow
+results, not the default direct-file reader. It requires explicit
+`READ_MODE 'TABLE_API'`; requesting it without that mode is an error. The cache
+defaults to OFF. Live Arrow retention remains disabled until a supported source
+snapshot and effective-authorization validator is available; requesting PARQUET
+currently still reads fresh Arrow streams. See the [cache instructions](test/README.md#guarded-arrow-to-parquet-cache-experimental).
 
 Schema binding allocates a read session with the column option omitted, reads its
 Arrow schema, and closes it without consuming rows. Execution allocates a fresh
@@ -62,7 +112,7 @@ matrices, native Iceberg fixtures and non-Windows builds remain release gates.
 - Connect to OneLake workspaces and lakehouses, including multiple lakehouses per workspace.
 - Set a default `lakehouse.schema` for queries and auto-discover tables lazily.
 - Query both Delta and Iceberg tables stored in OneLake lakehouses with standard SQL (Iceberg remains read-only).
-- Delta write operations with the bundled Rust writer in explicit DIRECT_FILES mode:
+- Delta write operations with the bundled Rust writer in DIRECT_FILES mode (the default, unless READ_ONLY):
     - `INSERT` pipelines with configurable modes (`append`, `overwrite`, `error_if_exists`, `ignore`).
     - Physical `CREATE TABLE` statements that materialize Delta metadata and paths.
     - Guarded `DROP TABLE`, `DELETE`, and `UPDATE` support (no `RETURNING`) with predicate pushdown.

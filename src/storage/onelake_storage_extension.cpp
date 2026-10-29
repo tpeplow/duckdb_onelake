@@ -264,7 +264,7 @@ unique_ptr<Catalog> OneLakeStorageExtension::AttachInternal(optional_ptr<Storage
 	ONELAKE_LOG_INFO(&context, "[attach] Resolving workspace='%s' lakehouse='%s'", workspace_token.c_str(),
 	                 default_lakehouse.c_str());
 
-	OneLakeReadMode read_mode = OneLakeReadMode::TABLE_API;
+	OneLakeReadMode read_mode = OneLakeReadMode::DIRECT_FILES;
 	bool read_cache = false;
 	// Validate the mode before performing authentication or discovery.
 	for (auto &option : info.options) {

@@ -25,7 +25,7 @@ public:
 	/// @param default_schema The default schema (lakehouse) to use.
 	explicit OneLakeCatalog(AttachedDatabase &db_p, const string &workspace_id, const string &catalog_name,
 	                        OneLakeCredentials credentials, string default_schema = string(),
-	                        OneLakeReadMode read_mode = OneLakeReadMode::TABLE_API, bool read_cache = false);
+	                        OneLakeReadMode read_mode = OneLakeReadMode::DIRECT_FILES, bool read_cache = false);
 	~OneLakeCatalog() override;
 	void OnDetach(ClientContext &context) override;
 

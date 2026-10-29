@@ -225,10 +225,18 @@ void TestCatalogRetirement() {
 	Query(connection, "LOAD onelake");
 	Query(connection, "CREATE SECRET detach_test (TYPE ONELAKE, PROVIDER credential_chain, CHAIN 'env')");
 	Query(connection, "ATTACH '00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002' "
-	                  "AS retirement (TYPE ONELAKE, READ_CACHE 'PARQUET')");
+	                  "AS files_default (TYPE ONELAKE)");
+	auto files = DatabaseManager::Get(*db.instance).GetDatabase("files_default");
+	auto &files_catalog = static_cast<OneLakeCatalog &>(files->GetCatalog());
+	Check(!files_catalog.UsesTableAPI(), "Omitted READ_MODE did not select the direct-file catalog path");
+	files_catalog.RequireWriteSupport();
+	Query(connection, "DETACH files_default");
+	Query(connection, "ATTACH '00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002' "
+	                  "AS retirement (TYPE ONELAKE, READ_MODE 'TABLE_API', READ_CACHE 'PARQUET')");
 	// Keep the catalog alive after DETACH: cleanup must use the hook, not just destruction.
 	auto attached = DatabaseManager::Get(*db.instance).GetDatabase("retirement");
 	auto &catalog = static_cast<OneLakeCatalog &>(attached->GetCatalog());
+	Check(catalog.UsesTableAPI(), "Explicit TABLE_API did not select the secured catalog path");
 	auto fixture = make_shared_ptr<Fixture>();
 	fixture->lifetime = catalog.ReadCacheLifetime();
 	auto function = OneLakeCachedScanFunction();
