@@ -265,8 +265,16 @@ unique_ptr<Catalog> OneLakeStorageExtension::AttachInternal(optional_ptr<Storage
 	                 default_lakehouse.c_str());
 
 	OneLakeReadMode read_mode = OneLakeReadMode::TABLE_API;
+	bool read_cache = false;
 	// Validate the mode before performing authentication or discovery.
 	for (auto &option : info.options) {
+		if (StringUtil::CIEquals(option.first, "read_cache")) {
+			if (!option.second.IsNull() && StringUtil::CIEquals(option.second.ToString(), "PARQUET")) {
+				read_cache = true;
+			} else if (option.second.IsNull() || !StringUtil::CIEquals(option.second.ToString(), "OFF")) {
+				throw InvalidInputException("READ_CACHE must be OFF or PARQUET");
+			}
+		}
 		if (StringUtil::CIEquals(option.first, "read_mode")) {
 			if (!option.second.IsNull() && StringUtil::CIEquals(option.second.ToString(), "TABLE_API")) {
 				read_mode = OneLakeReadMode::TABLE_API;
@@ -280,6 +288,10 @@ unique_ptr<Catalog> OneLakeStorageExtension::AttachInternal(optional_ptr<Storage
 			throw InvalidInputException("DEFAULT_LAKEHOUSE option is not supported. Specify lakehouse in ATTACH path: "
 			                            "'workspace-name/lakehouse-name.Lakehouse'");
 		}
+	}
+
+	if (read_cache && read_mode != OneLakeReadMode::TABLE_API) {
+		throw InvalidInputException("READ_CACHE PARQUET requires READ_MODE TABLE_API");
 	}
 
 	// Try to auto-create secrets from environment variables on every attach
@@ -321,7 +333,7 @@ unique_ptr<Catalog> OneLakeStorageExtension::AttachInternal(optional_ptr<Storage
 	}
 
 	return make_uniq<OneLakeCatalog>(db, workspace_id, name, std::move(credentials), std::move(default_lakehouse),
-	                                 read_mode);
+	                                 read_mode, read_cache);
 }
 
 unique_ptr<TransactionManager>

@@ -20,13 +20,16 @@
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/storage/database_size.hpp"
+#include "duckdb/common/types/uuid.hpp"
 
 namespace duckdb {
 
 OneLakeCatalog::OneLakeCatalog(AttachedDatabase &db_p, const string &workspace_id, const string &catalog_name,
-                               OneLakeCredentials credentials, string default_schema_p, OneLakeReadMode read_mode_p)
+                               OneLakeCredentials credentials, string default_schema_p, OneLakeReadMode read_mode_p,
+                               bool read_cache_p)
     : Catalog(db_p), workspace_id(workspace_id), access_mode(AccessMode::AUTOMATIC),
-      credentials(std::move(credentials)), read_mode(read_mode_p), schemas(*this),
+      credentials(std::move(credentials)), read_mode(read_mode_p), read_cache(read_cache_p),
+      read_cache_id(UUID::ToString(UUID::GenerateRandomUUID())), schemas(*this),
       default_schema(std::move(default_schema_p)), configured_default_preference(default_schema),
       user_configured_default(!default_schema.empty()) {
 	if (UsesTableAPI()) {

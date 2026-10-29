@@ -17,6 +17,7 @@ namespace {
 
 constexpr const char *CACHE_STATE = "onelake_cache_storage";
 constexpr const char *CACHE_PREFIX = "onelake-cache://";
+thread_local const vector<string> *authorized_paths = nullptr;
 
 class CacheHandle : public FileHandle {
 public:
@@ -58,6 +59,10 @@ public:
 			file->OpenWriter();
 		} else if (!flags.OpenForReading() || !file->Sealed()) {
 			throw IOException("OneLake cache entry is not sealed");
+		} else if (file->Guarded() &&
+		           (!authorized_paths ||
+		            std::find(authorized_paths->begin(), authorized_paths->end(), path) == authorized_paths->end())) {
+			throw IOException("OneLake cache reads require a revalidated scan");
 		}
 		return make_uniq<CacheHandle>(*this, path, flags, std::move(file));
 	}
@@ -149,7 +154,7 @@ void InvalidateRanges(DatabaseInstance &db, const string &path) {
 
 } // namespace
 
-OneLakeCachedFile::OneLakeCachedFile(BufferManager &manager) : manager(manager) {
+OneLakeCachedFile::OneLakeCachedFile(BufferManager &manager, bool guarded) : guarded(guarded), manager(manager) {
 }
 
 OneLakeCachedFile::~OneLakeCachedFile() {
@@ -253,9 +258,9 @@ shared_ptr<OneLakeCacheStorage> OneLakeCacheStorage::Get(ClientContext &context)
 	return context.registered_state->GetOrCreate<OneLakeCacheStorage>(CACHE_STATE, context);
 }
 
-string OneLakeCacheStorage::Create() {
+string OneLakeCacheStorage::Create(bool guarded) {
 	auto path = string(CACHE_PREFIX) + UUID::ToString(UUID::GenerateRandomUUID()) + ".parquet";
-	auto file = make_shared_ptr<OneLakeCachedFile>(BufferManager::GetBufferManager(db));
+	auto file = make_shared_ptr<OneLakeCachedFile>(BufferManager::GetBufferManager(db), guarded);
 	lock_guard<mutex> guard(lock);
 	files.emplace(path, std::move(file));
 	return path;
@@ -296,6 +301,14 @@ void OneLakeCacheStorage::Clear() {
 
 void RegisterOneLakeCacheStorage(DatabaseInstance &db) {
 	FileSystem::GetFileSystem(db).RegisterSubSystem(make_uniq<CacheFileSystem>());
+}
+
+OneLakeCacheReadScope::OneLakeCacheReadScope(const vector<string> *paths) : previous(authorized_paths) {
+	authorized_paths = paths;
+}
+
+OneLakeCacheReadScope::~OneLakeCacheReadScope() {
+	authorized_paths = previous;
 }
 
 struct OneLakeParquetFragment::State {
@@ -339,9 +352,9 @@ struct OneLakeParquetFragment::State {
 };
 
 OneLakeParquetFragment::OneLakeParquetFragment(ClientContext &context, const vector<string> &names,
-                                               const vector<LogicalType> &types)
+                                               const vector<LogicalType> &types, bool guarded)
     : state(make_uniq<State>(context, names, types)) {
-	state->path = state->storage->Create();
+	state->path = state->storage->Create(guarded);
 	state->global = state->function.copy_to_initialize_global(context, *state->bind, state->path);
 	state->local = state->function.copy_to_initialize_local(state->execution, *state->bind);
 }
@@ -403,8 +416,9 @@ string OneLakeParquetFragment::Finish() {
 		state->function.copy_to_finalize(state->context, *state->bind, *state->global);
 		state->global.reset();
 		state->storage->Seal(state->path);
+		auto path = state->path;
 		state->finished = true;
-		return state->path;
+		return path;
 	} catch (...) {
 		state->failed = true;
 		throw;

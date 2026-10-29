@@ -24,7 +24,7 @@ public:
 	/// @param default_schema The default schema (lakehouse) to use.
 	explicit OneLakeCatalog(AttachedDatabase &db_p, const string &workspace_id, const string &catalog_name,
 	                        OneLakeCredentials credentials, string default_schema = string(),
-	                        OneLakeReadMode read_mode = OneLakeReadMode::TABLE_API);
+	                        OneLakeReadMode read_mode = OneLakeReadMode::TABLE_API, bool read_cache = false);
 	~OneLakeCatalog() override;
 
 	string workspace_id;
@@ -64,6 +64,12 @@ public:
 	bool UsesTableAPI() const {
 		return read_mode == OneLakeReadMode::TABLE_API;
 	}
+	bool UsesReadCache() const {
+		return read_cache;
+	}
+	const string &ReadCacheId() const {
+		return read_cache_id;
+	}
 	void RequireWriteSupport() const;
 
 	// Getters for OneLake-specific properties
@@ -102,6 +108,8 @@ public:
 
 private:
 	const OneLakeReadMode read_mode;
+	const bool read_cache;
+	const string read_cache_id;
 	OneLakeSchemaSet schemas;
 	mutable mutex default_schema_lock;
 	string default_schema;
