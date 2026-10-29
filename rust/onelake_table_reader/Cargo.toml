@@ -1,0 +1,22 @@
+[package]
+name = "onelake_table_reader"
+version = "0.1.0"
+edition = "2021"
+description = "Arrow IPC reader for the OneLake secured table read API"
+license = "MIT"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+arrow-array = { version = "52.2", features = ["ffi"] }
+arrow-ipc = { version = "52.2", default-features = false }
+arrow-schema = "52.2"
+reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "json", "rustls-tls-native-roots"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+uuid = "1"
+
+[build-dependencies]
+cbindgen = "0.27"

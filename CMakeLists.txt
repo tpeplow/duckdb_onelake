@@ -140,6 +140,43 @@ add_custom_target(onelake_delta_writer ALL
   DEPENDS ${RUST_LIB} ${RUST_HEADER}
 )
 
+set(READER_CRATE_DIR ${CMAKE_CURRENT_LIST_DIR}/rust/onelake_table_reader)
+set(READER_BUILD_DIR ${CMAKE_BINARY_DIR}/onelake_table_reader)
+set(READER_HEADER ${READER_BUILD_DIR}/include/onelake_table_reader.h)
+if(WIN32)
+  set(READER_LIB_FILENAME onelake_table_reader.lib)
+else()
+  set(READER_LIB_FILENAME libonelake_table_reader.a)
+endif()
+if(RUST_TARGET_TRIPLE)
+  set(READER_LIB_SOURCE ${READER_CRATE_DIR}/target/${RUST_TARGET_TRIPLE}/release/${READER_LIB_FILENAME})
+else()
+  set(READER_LIB_SOURCE ${READER_CRATE_DIR}/target/release/${READER_LIB_FILENAME})
+endif()
+set(READER_LIB ${READER_BUILD_DIR}/lib/${READER_LIB_FILENAME})
+set(READER_CARGO_BUILD_ARGS --manifest-path ${READER_CRATE_DIR}/Cargo.toml --release --locked)
+if(RUST_TARGET_TRIPLE)
+  list(APPEND READER_CARGO_BUILD_ARGS --target ${RUST_TARGET_TRIPLE})
+endif()
+set(READER_ENV_VARS ONELAKE_READER_HEADER_DIR=${READER_BUILD_DIR}/include)
+if(APPLE)
+  list(APPEND READER_ENV_VARS MACOSX_DEPLOYMENT_TARGET=${RUST_MACOS_DEPLOYMENT_TARGET})
+endif()
+add_custom_command(
+  OUTPUT ${READER_LIB} ${READER_HEADER}
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${READER_BUILD_DIR}/lib
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${READER_BUILD_DIR}/include
+  ${RUST_TARGET_PREBUILD_COMMAND}
+  COMMAND ${CMAKE_COMMAND} -E env ${READER_ENV_VARS} cargo build ${READER_CARGO_BUILD_ARGS}
+  COMMAND ${CMAKE_COMMAND} -E copy ${READER_LIB_SOURCE} ${READER_LIB}
+  WORKING_DIRECTORY ${READER_CRATE_DIR}
+  DEPENDS ${READER_CRATE_DIR}/Cargo.toml ${READER_CRATE_DIR}/Cargo.lock
+          ${READER_CRATE_DIR}/build.rs ${READER_CRATE_DIR}/cbindgen.toml
+          ${READER_CRATE_DIR}/src/lib.rs ${READER_CRATE_DIR}/src/ipc.rs ${READER_CRATE_DIR}/src/ffi.rs
+  VERBATIM
+)
+add_custom_target(onelake_table_reader ALL DEPENDS ${READER_LIB} ${READER_HEADER})
+
 build_static_extension(${TARGET_NAME} "${EXTENSION_SOURCES_COMMON}")
 build_loadable_extension(${TARGET_NAME} " " "${EXTENSION_SOURCES_LOADABLE}")
 
@@ -151,20 +188,20 @@ set_property(TARGET ${LOADABLE_EXTENSION_NAME} PROPERTY CXX_STANDARD_REQUIRED ON
 find_package(BZip2 REQUIRED)
 
 # Static Lib
-add_dependencies(${EXTENSION_NAME} onelake_delta_writer)
-add_dependencies(${LOADABLE_EXTENSION_NAME} onelake_delta_writer)
+add_dependencies(${EXTENSION_NAME} onelake_delta_writer onelake_table_reader)
+add_dependencies(${LOADABLE_EXTENSION_NAME} onelake_delta_writer onelake_table_reader)
 
-target_link_libraries(${EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto CURL::libcurl JsonCpp::JsonCpp Azure::azure-identity BZip2::BZip2 ${RUST_LIB})
+target_link_libraries(${EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto CURL::libcurl JsonCpp::JsonCpp Azure::azure-identity BZip2::BZip2 ${RUST_LIB} ${READER_LIB})
 target_include_directories(
   ${EXTENSION_NAME}
-  PRIVATE OpenSSL::SSL OpenSSL::Crypto CURL::libcurl JsonCpp::JsonCpp Azure::azure-identity ${RUST_BUILD_DIR}/include)
+  PRIVATE OpenSSL::SSL OpenSSL::Crypto CURL::libcurl JsonCpp::JsonCpp Azure::azure-identity ${RUST_BUILD_DIR}/include ${READER_BUILD_DIR}/include)
 
 # Loadable extension
 target_link_libraries(
-  ${TARGET_NAME}_loadable_extension OpenSSL::SSL OpenSSL::Crypto CURL::libcurl JsonCpp::JsonCpp Azure::azure-identity BZip2::BZip2 ${RUST_LIB})
+  ${TARGET_NAME}_loadable_extension OpenSSL::SSL OpenSSL::Crypto CURL::libcurl JsonCpp::JsonCpp Azure::azure-identity BZip2::BZip2 ${RUST_LIB} ${READER_LIB})
 target_include_directories(
   ${TARGET_NAME}_loadable_extension
-  PRIVATE OpenSSL::SSL OpenSSL::Crypto CURL::libcurl JsonCpp::JsonCpp Azure::azure-identity ${RUST_BUILD_DIR}/include)
+  PRIVATE OpenSSL::SSL OpenSSL::Crypto CURL::libcurl JsonCpp::JsonCpp Azure::azure-identity ${RUST_BUILD_DIR}/include ${READER_BUILD_DIR}/include)
 
 if(WIN32)
   target_link_libraries(${EXTENSION_NAME} Userenv Ntdll)
