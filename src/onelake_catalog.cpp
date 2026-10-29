@@ -20,7 +20,7 @@
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/storage/database_size.hpp"
-#include "duckdb/common/types/uuid.hpp"
+#include "onelake_cached_scan.hpp"
 
 namespace duckdb {
 
@@ -29,7 +29,7 @@ OneLakeCatalog::OneLakeCatalog(AttachedDatabase &db_p, const string &workspace_i
                                bool read_cache_p)
     : Catalog(db_p), workspace_id(workspace_id), access_mode(AccessMode::AUTOMATIC),
       credentials(std::move(credentials)), read_mode(read_mode_p), read_cache(read_cache_p),
-      read_cache_id(UUID::ToString(UUID::GenerateRandomUUID())), schemas(*this),
+      read_cache_lifetime(make_shared_ptr<OneLakeCacheLifetime>(db_p.GetDatabase())), schemas(*this),
       default_schema(std::move(default_schema_p)), configured_default_preference(default_schema),
       user_configured_default(!default_schema.empty()) {
 	if (UsesTableAPI()) {
@@ -37,7 +37,14 @@ OneLakeCatalog::OneLakeCatalog(AttachedDatabase &db_p, const string &workspace_i
 	}
 }
 
-OneLakeCatalog::~OneLakeCatalog() = default;
+OneLakeCatalog::~OneLakeCatalog() {
+	read_cache_lifetime->Retire();
+}
+
+void OneLakeCatalog::OnDetach(ClientContext &context) {
+	read_cache_lifetime->Retire();
+	Catalog::OnDetach(context);
+}
 
 void OneLakeCatalog::RequireWriteSupport() const {
 	if (UsesTableAPI()) {

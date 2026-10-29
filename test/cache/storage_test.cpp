@@ -10,6 +10,38 @@
 using namespace duckdb;
 
 void TestCachedScan(DuckDB &db);
+void TestCatalogRetirement();
+void TestCacheDirectory(const string &directory);
+
+void TestMetadataAccounting() {
+	DBConfig config;
+	config.options.temporary_directory = "";
+	DuckDB db(nullptr, &config);
+	Connection connection(db);
+	auto limit = connection.Query("SET temp_directory=''; SET memory_limit='1MB'");
+	if (limit->HasError()) {
+		throw std::runtime_error(limit->GetError());
+	}
+	auto storage = OneLakeCacheStorage::Get(*connection.context);
+	auto &manager = BufferManager::GetBufferManager(*db.instance);
+	auto baseline = manager.GetUsedMemory();
+	bool exhausted = false;
+	try {
+		for (idx_t i = 0; i < 100000; ++i) {
+			storage->Create();
+		}
+	} catch (const OutOfMemoryException &) {
+		exhausted = true;
+	}
+	if (!exhausted || manager.GetUsedMemory() <= baseline) {
+		throw std::runtime_error("Cache metadata did not obey the shared memory limit");
+	}
+	storage->Clear();
+	if (manager.GetUsedMemory() != baseline) {
+		throw std::runtime_error("Failed metadata allocation or cleanup retained managed memory");
+	}
+	std::cout << "Metadata-only pressure and exact reservation cleanup passed\n";
+}
 static void Require(bool condition, const char *message) {
 	if (!condition) {
 		throw std::runtime_error(message);
@@ -195,11 +227,14 @@ int main(int argc, char **argv) {
 		}
 		DBConfig config;
 		config.options.temporary_directory = argv[1];
+		TestCacheDirectory(argv[1]);
 		DuckDB db(nullptr, &config);
 		RegisterOneLakeCacheStorage(*db.instance);
 		TestParquet(db);
 		TestCachedScan(db);
 		TestSpill(db);
+		TestMetadataAccounting();
+		TestCatalogRetirement();
 		return 0;
 	} catch (const std::exception &error) {
 		std::cerr << error.what() << '\n';

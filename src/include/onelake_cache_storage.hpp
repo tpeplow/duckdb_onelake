@@ -3,6 +3,7 @@
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
+#include "onelake_cache_memory.hpp"
 
 namespace duckdb {
 
@@ -24,14 +25,14 @@ public:
 	bool Guarded() const {
 		return guarded;
 	}
+	atomic<bool> was_read {false};
 
 private:
 	const bool guarded;
 	BufferManager &manager;
 	mutex lock;
-	vector<shared_ptr<BlockHandle>> blocks;
+	OneLakeCacheVector<shared_ptr<BlockHandle>> blocks;
 	idx_t size = 0;
-	idx_t reserved = 0;
 	bool opened = false;
 	bool sealed = false;
 	bool failed = false;
@@ -51,22 +52,24 @@ public:
 
 private:
 	DatabaseInstance &db;
+	Allocator &allocator;
 	mutex lock;
-	unordered_map<string, shared_ptr<OneLakeCachedFile>> files;
+	OneLakeCacheMap<shared_ptr<OneLakeCachedFile>> files;
 };
 
 void RegisterOneLakeCacheStorage(DatabaseInstance &db);
+bool OneLakeCacheDirectoryIsPrivate(const string &directory);
 
 // Only the validated scan adapter may open guarded files, including for metadata.
 class OneLakeCacheReadScope {
 public:
-	explicit OneLakeCacheReadScope(const vector<string> *paths);
+	explicit OneLakeCacheReadScope(const OneLakeCachePaths *paths);
 	~OneLakeCacheReadScope();
 	OneLakeCacheReadScope(const OneLakeCacheReadScope &) = delete;
 	OneLakeCacheReadScope &operator=(const OneLakeCacheReadScope &) = delete;
 
 private:
-	const vector<string> *previous;
+	const OneLakeCachePaths *previous;
 };
 
 class OneLakeParquetFragment {

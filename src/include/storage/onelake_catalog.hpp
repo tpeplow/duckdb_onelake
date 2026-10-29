@@ -6,6 +6,7 @@
 #include "duckdb/main/attached_database.hpp"
 
 namespace duckdb {
+class OneLakeCacheLifetime;
 
 class OneLakeSchemaEntry;
 enum class OneLakeReadMode { TABLE_API, DIRECT_FILES };
@@ -26,6 +27,7 @@ public:
 	                        OneLakeCredentials credentials, string default_schema = string(),
 	                        OneLakeReadMode read_mode = OneLakeReadMode::TABLE_API, bool read_cache = false);
 	~OneLakeCatalog() override;
+	void OnDetach(ClientContext &context) override;
 
 	string workspace_id;
 	AccessMode access_mode;
@@ -67,8 +69,8 @@ public:
 	bool UsesReadCache() const {
 		return read_cache;
 	}
-	const string &ReadCacheId() const {
-		return read_cache_id;
+	shared_ptr<OneLakeCacheLifetime> ReadCacheLifetime() const {
+		return read_cache_lifetime;
 	}
 	void RequireWriteSupport() const;
 
@@ -109,7 +111,7 @@ public:
 private:
 	const OneLakeReadMode read_mode;
 	const bool read_cache;
-	const string read_cache_id;
+	const shared_ptr<OneLakeCacheLifetime> read_cache_lifetime;
 	OneLakeSchemaSet schemas;
 	mutable mutex default_schema_lock;
 	string default_schema;

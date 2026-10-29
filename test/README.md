@@ -54,8 +54,17 @@ a TTL, matching token, schema or file version is not a substitute. There is
 no SQL override. Normal secured Arrow reads continue without encoding overhead.
 
 Configure with `-DONELAKE_BUILD_CACHE_PROTOTYPE=ON` and build the
-`onelake_cache_storage_test` target. Run it with a new private temporary-directory
-path as its sole argument. It uses synthetic data only: no Fabric access,
+`onelake_cache_storage_test` target. Run it with an existing, empty, private
+temporary-directory path as its sole argument. On Windows, the helper below
+creates a fresh fixture with a protected ACL and also tests junction rejection:
+
+```powershell
+pwsh -NoProfile -File test\cache\run.ps1 -TempDirectory <new-absolute-fixture-path>
+```
+
+On POSIX, create the fixture with mode 0700 and use `umask 077` so native spill
+files also remain private. The helper never changes an existing directory and
+never recursively deletes one. The tests use synthetic data only: no Fabric access,
 tokens or external services are required. An in-process source supplies an
 explicit synthetic snapshot/policy validator; this does not prove live safety.
 The executable exercises native
@@ -87,14 +96,34 @@ Cache-local fill errors discard the entry and continue the same Arrow stream.
 Cache-read errors can fall back to a fresh authorized stream only before any
 output; after output they fail the query, never replaying it.
 
-Files and manifests are connection-private. Data blocks and the block index use
-DuckDB memory/spill accounting; normal cleanup does not promise secure erasure.
+Files and manifests are connection-private. Attachment retirement removes its
+entries across owning connections, invalidates their byte ranges, and rejects
+old prepared scans. A new attachment gets a new namespace. Already-running
+readers can retain their backing objects until they release their handles.
+
+Data blocks, file objects/control blocks, block indexes, manifest paths/keys,
+registry nodes, and lifetime tracking use DuckDB's buffer allocator. Growth is
+charged before allocation; metadata-only exhaustion and exact cleanup are tested.
+Native Parquet still follows DuckDB's own allocation/accounting behavior; this
+does not impose a process-wide RSS bound or account every engine/OS allocation.
+Normal cleanup does not promise secure erasure. Unread files do not create
+external-file-cache metadata merely to invalidate them.
+
+Before fill or reuse, admission checks the configured spill directory. A disk
+directory must already exist at an absolute normalized local path. Windows
+checks owner/DACL, rejects reparse points, remote drives and unsafe ancestors;
+POSIX checks ownership/modes and rejects links and unsafe ancestors. Existing
+children must also pass checks. Unverifiable admission is a miss, not an error
+or a permission change. An empty `temp_directory` permits memory-only caching,
+with DuckDB allocation failures still causing fill abandonment.
+OS owners/administrators and host configuration are trusted: do not change
+directory permissions or spill configuration while retained data exists.
+
 The current geometry (one fragment per received batch, 2,048-row groups, Snappy)
-is untuned. Encoding performs an additional Arrow-to-DuckDB conversion. Metadata
-and allocator overhead are not a strict process-RSS bound. Before enabling live
-retention, establish the service validator, private spill-directory admission,
-complete accounting, and attachment-retirement handling. These remain production
-gates, not capabilities established by synthetic tests.
+is untuned. Encoding performs an additional Arrow-to-DuckDB conversion.
+The local production gates are implemented and tested on Windows; POSIX runtime
+validation remains part of the cross-platform release work. Live retention still
+requires the supported service snapshot/effective-authorization validator.
 
 ## Rust table reader
 

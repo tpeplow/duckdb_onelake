@@ -5,6 +5,20 @@
 
 namespace duckdb {
 
+class OneLakeCacheLifetime {
+public:
+	explicit OneLakeCacheLifetime(DatabaseInstance &db);
+	~OneLakeCacheLifetime();
+	const string &Id() const;
+	void CheckActive() const;
+	void Track(ClientContext &context);
+	void Retire();
+
+private:
+	struct State;
+	unique_ptr<State> state;
+};
+
 struct OneLakeOpenedRead {
 	unique_ptr<ArrowArrayStreamWrapper> stream;
 	// Must validate the exact snapshot AND effective authorization of this allocation.
@@ -16,6 +30,7 @@ class OneLakeScanSource {
 public:
 	virtual ~OneLakeScanSource() = default;
 	virtual string CacheKey() const = 0;
+	virtual OneLakeCacheLifetime &Lifetime() const = 0;
 	virtual void CheckIdentity(ClientContext &context) = 0;
 	virtual OneLakeOpenedRead Open(ClientContext &context, const vector<string> &columns) = 0;
 };
