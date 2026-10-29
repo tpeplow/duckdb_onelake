@@ -1,4 +1,5 @@
 #include "storage/onelake_schema_entry.hpp"
+#include "storage/onelake_catalog.hpp"
 #include "storage/onelake_table_entry.hpp"
 #include "storage/onelake_transaction.hpp"
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
@@ -21,6 +22,7 @@ OneLakeSchemaEntry::~OneLakeSchemaEntry() {
 }
 
 optional_ptr<CatalogEntry> OneLakeSchemaEntry::CreateTable(CatalogTransaction transaction, BoundCreateTableInfo &info) {
+	ParentCatalog().Cast<OneLakeCatalog>().RequireWriteSupport();
 	auto &base_info = info.Base();
 	auto table_name = base_info.table;
 	if (base_info.on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT) {
@@ -87,6 +89,7 @@ optional_ptr<CatalogEntry> OneLakeSchemaEntry::CreateCollation(CatalogTransactio
 }
 
 void OneLakeSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
+	ParentCatalog().Cast<OneLakeCatalog>().RequireWriteSupport();
 	if (info.type != AlterType::ALTER_TABLE) {
 		throw BinderException("Only altering tables is supported for OneLake lakehouses");
 	}
@@ -112,7 +115,12 @@ void OneLakeSchemaEntry::Scan(ClientContext &context, CatalogType type,
 	if (type == CatalogType::TABLE_ENTRY) {
 		tables.EnsureFresh(context);
 	}
-	GetCatalogSet(type).Scan(context, callback);
+	GetCatalogSet(type).Scan(context, [&](CatalogEntry &entry) {
+		if (type == CatalogType::TABLE_ENTRY && ParentCatalog().Cast<OneLakeCatalog>().UsesTableAPI()) {
+			entry.Cast<OneLakeTableEntry>().EnsureColumnDefinitions(context);
+		}
+		callback(entry);
+	});
 }
 
 void OneLakeSchemaEntry::Scan(CatalogType type, const std::function<void(CatalogEntry &)> &callback) {
@@ -120,6 +128,7 @@ void OneLakeSchemaEntry::Scan(CatalogType type, const std::function<void(Catalog
 }
 
 void OneLakeSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
+	ParentCatalog().Cast<OneLakeCatalog>().RequireWriteSupport();
 	GetCatalogSet(info.type).DropEntry(context, info);
 }
 
@@ -137,6 +146,9 @@ optional_ptr<CatalogEntry> OneLakeSchemaEntry::LookupEntry(CatalogTransaction tr
 	}
 	if (result || lookup_info.GetCatalogType() != CatalogType::TABLE_ENTRY || !transaction.HasContext()) {
 		return result;
+	}
+	if (ParentCatalog().Cast<OneLakeCatalog>().UsesTableAPI()) {
+		return nullptr;
 	}
 
 	auto &context = transaction.GetContext();

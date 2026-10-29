@@ -20,6 +20,8 @@ struct OneLakeLakehouse {
 	string description;
 	bool schema_enabled = false;
 	string default_schema;
+	string table_api_origin;
+	string table_catalog_url;
 };
 
 struct OneLakeSchema {

@@ -7,6 +7,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/main/config.hpp"
+#include "duckdb/main/client_config.hpp"
 #include <cstdlib>
 #include <exception>
 #include <mutex>
@@ -35,6 +36,12 @@ struct EnvTokenVariableConfig {
 };
 
 string TryGetSetVariableValue(ClientContext &context, const string &variable_name) {
+	Value value;
+	if (ClientConfig::GetConfig(context).GetUserVariable(variable_name, value) && !value.IsNull()) {
+		auto token = value.ToString();
+		StringUtil::Trim(token);
+		return token;
+	}
 	auto &config = DBConfig::GetConfig(context);
 	std::lock_guard<std::mutex> lock(config.config_lock);
 	auto entry = config.options.set_variables.find(variable_name);

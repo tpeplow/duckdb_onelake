@@ -38,7 +38,7 @@ CREATE SECRET onelake_modes_test (
 # Attach test lakehouse
 statement ok
 ATTACH '${TEST_WORKSPACE}/${TEST_LAKEHOUSE}.Lakehouse' 
-    AS modes_db (TYPE ONELAKE);
+    AS modes_db (TYPE ONELAKE, READ_MODE 'DIRECT_FILES');
 
 # ============================================================================
 # Test 1: Default INSERT mode (append)

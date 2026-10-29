@@ -55,7 +55,7 @@ pub struct ReadRequest {
     pub item_id: String,
     pub schema_name: String,
     pub table_name: String,
-    pub columns: Vec<String>,
+    pub columns: Option<Vec<String>>,
 }
 
 impl ReadRequest {
@@ -87,9 +87,11 @@ impl ReadRequest {
                 return Err(ReadError::InvalidRequest("invalid schema or table name"));
             }
         }
-        if self.columns.is_empty() || self.columns.iter().any(|name| name.is_empty()) {
+        if self.columns.as_ref().is_some_and(|columns| {
+            columns.is_empty() || columns.iter().any(|name| name.is_empty() || name == "*")
+        }) {
             return Err(ReadError::InvalidRequest(
-                "at least one explicit column is required",
+                "omit columns for the authorized schema, or supply nonempty explicit column names",
             ));
         }
         url.path_segments_mut()
@@ -138,7 +140,11 @@ impl ReadState {
 }
 
 trait Transport: Send {
-    fn allocate(&self, table_url: &Url, columns: &[String]) -> Result<VecDeque<String>, ReadError>;
+    fn allocate(
+        &self,
+        table_url: &Url,
+        columns: Option<&[String]>,
+    ) -> Result<VecDeque<String>, ReadError>;
     fn stream(&self, url: Url) -> Result<Box<dyn Read + Send>, ReadError>;
 }
 
@@ -208,12 +214,20 @@ impl HttpTransport {
 }
 
 impl Transport for HttpTransport {
-    fn allocate(&self, table_url: &Url, columns: &[String]) -> Result<VecDeque<String>, ReadError> {
+    fn allocate(
+        &self,
+        table_url: &Url,
+        columns: Option<&[String]>,
+    ) -> Result<VecDeque<String>, ReadError> {
+        let body = match columns {
+            Some(columns) => serde_json::json!({ "columns": columns }),
+            None => serde_json::json!({}),
+        };
         let response = self
             .client
             .post(child_url(table_url, &["read"]))
             .header(AUTHORIZATION, self.authorization.clone())
-            .json(&serde_json::json!({ "columns": columns }))
+            .json(&body)
             .send()
             .map_err(|_| ReadError::Transport)?;
         if response.status().as_u16() != 200 {
@@ -270,7 +284,9 @@ pub struct TableReader {
     table_url: Url,
     streams: VecDeque<String>,
     current: Option<StreamReader<FramedReader>>,
+    source_schema: SchemaRef,
     schema: SchemaRef,
+    projection: Option<Vec<usize>>,
     state: ReadState,
     finished: bool,
 }
@@ -289,27 +305,53 @@ impl TableReader {
 
     fn open_transport(
         table_url: Url,
-        columns: Vec<String>,
+        columns: Option<Vec<String>>,
         transport: Box<dyn Transport>,
     ) -> Result<Self, ReadError> {
         let state = ReadState {
             cancellation: Cancellation(Arc::new(AtomicBool::new(false))),
             deadline: Instant::now() + Duration::from_secs(60 * 60),
         };
-        let mut streams = transport.allocate(&table_url, &columns)?;
+        let mut streams = transport.allocate(&table_url, columns.as_deref())?;
         let first = streams.pop_front().ok_or(ReadError::Allocation)?;
         state.check()?;
         let body = transport.stream(child_url(&table_url, &["readStream", &first]))?;
         let current =
             StreamReader::try_new_unbuffered(FramedReader::new(body, state.clone()), None)
                 .map_err(|_| ReadError::Arrow)?;
-        let schema = current.schema();
+        let source_schema = current.schema();
+        let projection = match columns {
+            Some(columns) => {
+                if columns.len() != source_schema.fields().len() {
+                    return Err(ReadError::Arrow);
+                }
+                let indices = columns
+                    .iter()
+                    .map(|column| source_schema.index_of(column).map_err(|_| ReadError::Arrow))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if indices.iter().collect::<HashSet<_>>().len() != indices.len() {
+                    return Err(ReadError::Arrow);
+                }
+                Some(indices)
+            }
+            None => None,
+        };
+        let schema = match &projection {
+            Some(indices) => Arc::new(
+                source_schema
+                    .project(indices)
+                    .map_err(|_| ReadError::Arrow)?,
+            ),
+            None => source_schema.clone(),
+        };
         Ok(Self {
             transport,
             table_url,
             streams,
             current: Some(current),
+            source_schema,
             schema,
+            projection,
             state,
             finished: false,
         })
@@ -326,7 +368,15 @@ impl TableReader {
                 if let Some(batch) = current.next() {
                     // Preserve cancellation/expiry instead of disguising them as decode failures.
                     self.state.check()?;
-                    return batch.map(Some).map_err(|_| ReadError::Arrow);
+                    let batch = batch.map_err(|_| ReadError::Arrow)?;
+                    // The service can return columns in table order, not request order.
+                    return match &self.projection {
+                        Some(indices) => batch
+                            .project(indices)
+                            .map(Some)
+                            .map_err(|_| ReadError::Arrow),
+                        None => Ok(Some(batch)),
+                    };
                 }
             }
             self.state.check()?;
@@ -340,7 +390,7 @@ impl TableReader {
             let reader =
                 StreamReader::try_new_unbuffered(FramedReader::new(body, self.state.clone()), None)
                     .map_err(|_| ReadError::Arrow)?;
-            if reader.schema() != self.schema {
+            if reader.schema() != self.source_schema {
                 return Err(ReadError::SchemaChanged);
             }
             self.current = Some(reader);

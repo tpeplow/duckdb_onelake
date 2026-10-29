@@ -20,7 +20,7 @@ fn request() -> ReadRequest {
         item_id: "e156aaec-f130-4145-b4d3-e8ffbce00b87".into(),
         schema_name: "dbo".into(),
         table_name: "PricePaid".into(),
-        columns: vec!["Price".into()],
+        columns: Some(vec!["Price".into()]),
     }
 }
 
@@ -46,8 +46,8 @@ struct MockTransport {
 }
 
 impl Transport for MockTransport {
-    fn allocate(&self, _: &Url, columns: &[String]) -> Result<VecDeque<String>, ReadError> {
-        assert_eq!(columns, ["Price"]);
+    fn allocate(&self, _: &Url, columns: Option<&[String]>) -> Result<VecDeque<String>, ReadError> {
+        assert!(columns.is_some());
         self.calls.lock().unwrap().push("allocate".into());
         Ok((0..self.bodies.lock().unwrap().len())
             .map(|n| format!("stream{n}"))
@@ -65,6 +65,13 @@ impl Transport for MockTransport {
 }
 
 fn reader_with_bodies(bodies: Vec<Box<dyn Read + Send>>) -> (TableReader, Arc<Mutex<Vec<String>>>) {
+    reader_with_columns(bodies, vec!["Price".into()])
+}
+
+fn reader_with_columns(
+    bodies: Vec<Box<dyn Read + Send>>,
+    columns: Vec<String>,
+) -> (TableReader, Arc<Mutex<Vec<String>>>) {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let transport = MockTransport {
         bodies: Mutex::new(bodies.into()),
@@ -73,11 +80,34 @@ fn reader_with_bodies(bodies: Vec<Box<dyn Read + Send>>) -> (TableReader, Arc<Mu
     let request = request();
     let reader = TableReader::open_transport(
         request.table_url().unwrap(),
-        request.columns,
+        Some(columns),
         Box::new(transport),
     )
     .unwrap();
     (reader, calls)
+}
+
+#[test]
+fn reorders_service_columns_to_match_requested_projection() {
+    let first = Arc::new(Float64Array::from(vec![10.0, 20.0])) as ArrayRef;
+    let second = Arc::new(Float64Array::from(vec![100.0, 200.0])) as ArrayRef;
+    let batch = RecordBatch::try_from_iter(vec![("Price", first), ("Other", second)]).unwrap();
+    let mut bytes = Vec::new();
+    {
+        let mut writer = StreamWriter::try_new(&mut bytes, &batch.schema()).unwrap();
+        writer.write(&batch).unwrap();
+        writer.finish().unwrap();
+    }
+    let (mut reader, _) = reader_with_columns(
+        vec![Box::new(Cursor::new(bytes))],
+        vec!["Other".into(), "Price".into()],
+    );
+    assert_eq!(reader.schema().field(0).name(), "Other");
+    assert_eq!(
+        reader.next().unwrap().unwrap(),
+        batch.project(&[1, 0]).unwrap()
+    );
+    assert!(reader.next().is_none());
 }
 
 fn reader(streams: Vec<Vec<u8>>) -> (TableReader, Arc<Mutex<Vec<String>>>) {
@@ -394,18 +424,35 @@ fn checks_stream_status_and_content_type_and_reads_real_http_body() {
 fn sends_verified_projection_and_never_follows_redirects_or_exposes_error_body() {
     let transport = HttpTransport::new("test-token").unwrap();
     let (url, server) = serve_once("200 OK", r#"{"streams":[{"streamId":"first"}]}"#);
-    let streams = transport.allocate(&url, &["Price".into()]).unwrap();
+    let streams = transport.allocate(&url, Some(&["Price".into()])).unwrap();
     assert_eq!(streams[0], "first");
     let request = server.join().unwrap();
     assert!(request.starts_with("POST /table/read "));
     assert!(request.ends_with(r#"{"columns":["Price"]}"#));
     for status in ["302 Found", "500 Internal Server Error"] {
         let (url, server) = serve_once(status, "sensitive-service-error");
-        let error = transport.allocate(&url, &["Price".into()]).unwrap_err();
+        let error = transport
+            .allocate(&url, Some(&["Price".into()]))
+            .unwrap_err();
         assert!(matches!(error, ReadError::Http { .. }));
         assert!(!error.to_string().contains("sensitive-service-error"));
         assert!(!error.to_string().contains("test-token"));
         server.join().unwrap();
+    }
+}
+
+#[test]
+fn omitted_projection_requests_authorized_schema_without_a_literal_wildcard() {
+    let transport = HttpTransport::new("test-token").unwrap();
+    let (url, server) = serve_once("200 OK", r#"{"streams":[{"streamId":"schema"}]}"#);
+    transport.allocate(&url, None).unwrap();
+    assert!(server.join().unwrap().ends_with("{}"));
+    let mut request = request();
+    request.columns = None;
+    assert!(request.table_url().is_ok());
+    for columns in [vec![], vec!["*".to_string()], vec!["".to_string()]] {
+        request.columns = Some(columns);
+        assert!(request.table_url().is_err());
     }
 }
 

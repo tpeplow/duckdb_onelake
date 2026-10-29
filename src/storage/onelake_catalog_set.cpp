@@ -9,15 +9,7 @@ OneLakeCatalogSet::OneLakeCatalogSet(Catalog &catalog) : catalog(catalog), is_lo
 }
 
 optional_ptr<CatalogEntry> OneLakeCatalogSet::GetEntry(ClientContext &context, const string &name) {
-	if (!is_loaded) {
-		is_loaded = true;
-		try {
-			LoadEntries(context);
-		} catch (...) {
-			is_loaded = false;
-			throw;
-		}
-	}
+	EnsureLoaded(context);
 	lock_guard<mutex> l(entry_lock);
 	auto entry = entries.find(name);
 	if (entry == entries.end()) {
@@ -38,15 +30,7 @@ void OneLakeCatalogSet::EraseEntryInternal(const string &name) {
 }
 
 void OneLakeCatalogSet::Scan(ClientContext &context, const std::function<void(CatalogEntry &)> &callback) {
-	if (!is_loaded) {
-		is_loaded = true;
-		try {
-			LoadEntries(context);
-		} catch (...) {
-			is_loaded = false;
-			throw;
-		}
-	}
+	EnsureLoaded(context);
 	lock_guard<mutex> l(entry_lock);
 	for (auto &entry : entries) {
 		callback(*entry.second);
@@ -64,24 +48,29 @@ optional_ptr<CatalogEntry> OneLakeCatalogSet::CreateEntry(unique_ptr<CatalogEntr
 }
 
 void OneLakeCatalogSet::ClearEntries() {
+	lock_guard<mutex> load_guard(load_lock);
+	lock_guard<mutex> entry_guard(entry_lock);
 	entries.clear();
 	is_loaded = false;
 }
 
 void OneLakeCatalogSet::EnsureLoaded(ClientContext &context) {
+	lock_guard<mutex> guard(load_lock);
 	if (is_loaded) {
 		return;
 	}
-	is_loaded = true;
 	try {
 		LoadEntries(context);
+		is_loaded = true;
 	} catch (...) {
-		is_loaded = false;
+		lock_guard<mutex> entry_guard(entry_lock);
+		entries.clear();
 		throw;
 	}
 }
 
 bool OneLakeCatalogSet::IsLoaded() const {
+	lock_guard<mutex> guard(load_lock);
 	return is_loaded;
 }
 

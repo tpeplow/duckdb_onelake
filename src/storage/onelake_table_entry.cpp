@@ -5,6 +5,7 @@
 #include "storage/onelake_http_util.hpp"
 #include "storage/onelake_path_util.hpp"
 #include "onelake_api.hpp"
+#include "onelake_table_reader.hpp"
 #include "onelake_logging.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
@@ -175,7 +176,7 @@ void OneLakeTableEntry::RememberResolvedPath(const string &path) {
 }
 
 bool OneLakeTableEntry::EnsureColumnDefinitions(ClientContext &context) {
-	if (GetColumns().PhysicalColumnCount() > 0) {
+	if (!ParentCatalog().Cast<OneLakeCatalog>().UsesTableAPI() && GetColumns().PhysicalColumnCount() > 0) {
 		return true;
 	}
 	unique_ptr<FunctionData> temp_bind_data;
@@ -261,9 +262,32 @@ void OneLakeTableEntry::BindUpdateConstraints(Binder &, LogicalGet &, LogicalPro
 
 TableFunction OneLakeTableEntry::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) {
 	std::lock_guard<std::mutex> guard(bind_lock);
-	EnsureDetailsLoaded(context);
 	auto &catalog = ParentCatalog().Cast<OneLakeCatalog>();
 	auto &schema_entry = ParentSchema().Cast<OneLakeSchemaEntry>();
+	if (catalog.UsesTableAPI()) {
+		if (!schema_entry.schema_data) {
+			throw InternalException("OneLake table API routing is unavailable");
+		}
+		vector<string> names;
+		vector<LogicalType> types;
+		auto function = BindOneLakeTableRead(context, catalog, *schema_entry.schema_data, schema_entry.name, name,
+		                                     bind_data, names, types);
+		if (GetColumns().PhysicalColumnCount() == 0) {
+			UpdateColumnDefinitions(names, types);
+		} else {
+			if (GetColumns().PhysicalColumnCount() != names.size()) {
+				throw IOException("OneLake caller-visible schema changed; detach and reattach");
+			}
+			for (idx_t i = 0; i < names.size(); i++) {
+				const auto &column = GetColumns().GetColumn(LogicalIndex(i));
+				if (column.GetName() != names[i] || column.GetType() != types[i]) {
+					throw IOException("OneLake caller-visible schema changed; detach and reattach");
+				}
+			}
+		}
+		return function;
+	}
+	EnsureDetailsLoaded(context);
 	if (!table_data) {
 		throw InternalException("Table metadata missing for OneLake table '%s'", name);
 	}

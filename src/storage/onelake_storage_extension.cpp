@@ -203,7 +203,7 @@ static OneLakeWorkspace ResolveWorkspace(ClientContext &context, OneLakeCredenti
 
 	if (LooksLikeGuid(token)) {
 		OneLakeWorkspace workspace;
-		workspace.id = token;
+		workspace.id = StringUtil::Lower(token);
 		workspace.name = token;
 		workspace.display_name = token;
 		return workspace;
@@ -264,8 +264,18 @@ unique_ptr<Catalog> OneLakeStorageExtension::AttachInternal(optional_ptr<Storage
 	ONELAKE_LOG_INFO(&context, "[attach] Resolving workspace='%s' lakehouse='%s'", workspace_token.c_str(),
 	                 default_lakehouse.c_str());
 
-	// Check for unsupported options
+	OneLakeReadMode read_mode = OneLakeReadMode::TABLE_API;
+	// Validate the mode before performing authentication or discovery.
 	for (auto &option : info.options) {
+		if (StringUtil::CIEquals(option.first, "read_mode")) {
+			if (!option.second.IsNull() && StringUtil::CIEquals(option.second.ToString(), "TABLE_API")) {
+				read_mode = OneLakeReadMode::TABLE_API;
+			} else if (!option.second.IsNull() && StringUtil::CIEquals(option.second.ToString(), "DIRECT_FILES")) {
+				read_mode = OneLakeReadMode::DIRECT_FILES;
+			} else {
+				throw InvalidInputException("READ_MODE must be TABLE_API or DIRECT_FILES");
+			}
+		}
 		if (StringUtil::CIEquals(option.first, "default_lakehouse")) {
 			throw InvalidInputException("DEFAULT_LAKEHOUSE option is not supported. Specify lakehouse in ATTACH path: "
 			                            "'workspace-name/lakehouse-name.Lakehouse'");
@@ -277,7 +287,7 @@ unique_ptr<Catalog> OneLakeStorageExtension::AttachInternal(optional_ptr<Storage
 
 	// Resolve credentials using the most specific secret available
 	auto catalog_transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
-	const auto secret_candidate_path = "onelake://" + workspace_token;
+	const auto secret_candidate_path = "onelake://" + workspace_token + "/" + default_lakehouse;
 	auto secret_match = secret_manager.LookupSecret(catalog_transaction, secret_candidate_path, "onelake");
 	if (!secret_match.HasMatch()) {
 		secret_match = secret_manager.LookupSecret(catalog_transaction, "onelake://", "onelake");
@@ -302,7 +312,7 @@ unique_ptr<Catalog> OneLakeStorageExtension::AttachInternal(optional_ptr<Storage
 	ONELAKE_LOG_INFO(&context, "[attach] Workspace resolved to id=%s", workspace_id.c_str());
 
 	if (!StringUtil::CIEquals(workspace_id, workspace_token)) {
-		const auto refined_secret_path = "onelake://" + workspace_id;
+		const auto refined_secret_path = "onelake://" + workspace_id + "/" + default_lakehouse;
 		auto refined_match = secret_manager.LookupSecret(catalog_transaction, refined_secret_path, "onelake");
 		if (refined_match.HasMatch() && refined_match.GetSecret().GetName() != secret_match.GetSecret().GetName()) {
 			credentials = ExtractCredentialsFromSecret(refined_match.GetSecret());
@@ -310,7 +320,8 @@ unique_ptr<Catalog> OneLakeStorageExtension::AttachInternal(optional_ptr<Storage
 		}
 	}
 
-	return make_uniq<OneLakeCatalog>(db, workspace_id, name, std::move(credentials), std::move(default_lakehouse));
+	return make_uniq<OneLakeCatalog>(db, workspace_id, name, std::move(credentials), std::move(default_lakehouse),
+	                                 read_mode);
 }
 
 unique_ptr<TransactionManager>

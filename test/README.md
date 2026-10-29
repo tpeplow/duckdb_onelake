@@ -12,9 +12,20 @@ make test_debug
 
 ## Rust table reader
 
-The secured table reader is currently a standalone reader and C ABI integrated into
-the native build. ATTACH and SELECT still use the existing scan path; the reader
-does not yet change the extension's read defaults.
+ATTACH defaults to the secured reader. The explicit `DIRECT_FILES` mode retains
+the legacy scan path. `sql/onelake_read_modes.test` covers mode validation and
+lazy attachment without contacting Fabric. Existing remote-write examples must
+explicitly select DIRECT_FILES until independently authorized writes are implemented.
+
+The opt-in SQL test `sql/onelake_table_api_live.test` requires
+`ONELAKE_LIVE_READ_APPROVED=true`, `ONELAKE_TEST_WORKSPACE`, `ONELAKE_TEST_ITEM`,
+`ONELAKE_TEST_SCHEMA`, `ONELAKE_TEST_TABLE`, and `ONELAKE_TEST_PROVIDER` (`env` or
+`cli`). It expects a PricePaid-compatible table with at least ten positive-price
+rows and the columns Price, PropertyType and DateOfTransfer. It covers prepared
+re-execution, COUNT without selected columns, projected types, local filtering
+and joins. All reads are limited samples, not full-table/security-policy tests.
+When using `env`, supply the Storage token only in memory. Running the test
+allocates billed read sessions. Do not enable it against an unapproved target.
 
 Run its deterministic tests and checks from the repository root:
 
@@ -32,7 +43,9 @@ redirect rejection, and Arrow C stream ownership.
 An ignored `approved_live_first_batch` test reads only the first batch from an
 explicitly approved target. Set `ONELAKE_TABLE_READER_REQUEST` to a JSON object
 containing `baseUrl` (the discovered HTTPS OneLake table origin), `workspaceId`,
-`itemId`, `schemaName`, `tableName`, and a nonempty `columns` array. Set
+`itemId`, `schemaName`, `tableName`, and a nonempty `columns` array. Omit `columns`
+to request the caller-visible schema/all authorized columns; do not send `["*"]`.
+Set
 `AZURE_STORAGE_TOKEN` in memory to the caller's token for the exact audience
 `https://storage.azure.com` (no trailing slash). Never store tokens in files or
 logs. Then run:

@@ -1,4 +1,5 @@
 #include "onelake_api.hpp"
+#include "onelake_secret.hpp"
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -6,7 +7,7 @@
 #include "duckdb/common/types/interval.hpp"
 #include <azure/core/context.hpp>
 #include <azure/core/credentials/credentials.hpp>
-#include <azure/identity/default_azure_credential.hpp>
+#include <azure/identity/azure_cli_credential.hpp>
 #include <curl/curl.h>
 #include <json/json.h>
 #include <unordered_set>
@@ -596,37 +597,49 @@ static vector<OneLakeTable> FetchIcebergTables(const string &workspace_id, const
 	return tables;
 }
 
-string OneLakeAPI::GetAccessToken(OneLakeCredentials &credentials, OneLakeTokenAudience audience) {
+string OneLakeAPI::GetAccessToken(OneLakeCredentials &credentials, OneLakeTokenAudience audience,
+                                  ClientContext *context) {
+	std::lock_guard<std::mutex> guard(*credentials.token_mutex);
 	const auto &scope = ScopeForAudience(audience);
 	auto current_time = Timestamp::GetCurrentTimestamp();
-	auto cache_entry = credentials.token_cache.find(scope);
-	if (cache_entry != credentials.token_cache.end()) {
-		if (!cache_entry->second.token.empty() && current_time < cache_entry->second.expiry) {
-			return cache_entry->second.token;
-		}
-	}
 
 	if (credentials.provider == OneLakeCredentialProvider::CredentialChain) {
-		try {
-			auto credential = std::make_shared<Azure::Identity::DefaultAzureCredential>();
-			Azure::Core::Credentials::TokenRequestContext request_context;
-			request_context.Scopes = {scope};
-			Azure::Core::Context azure_context;
-			auto access_token_result = credential->GetToken(request_context, azure_context);
-			auto access_token = access_token_result.Token;
-			auto expires_on = access_token_result.ExpiresOn.time_since_epoch();
-			auto expires_microseconds = std::chrono::duration_cast<std::chrono::microseconds>(expires_on).count();
-			auto expiry = Timestamp::FromEpochMicroSeconds(expires_microseconds);
-
-			OneLakeCredentials::TokenCacheEntry entry;
-			entry.token = access_token;
-			entry.expiry = expiry;
-			credentials.token_cache[scope] = entry;
-
-			return access_token;
-		} catch (const std::exception &ex) {
-			throw IOException("Failed to obtain OneLake access token via Azure credential chain: %s", ex.what());
+		for (const auto &step : ParseOneLakeCredentialChain(credentials.credential_chain)) {
+			if (step == "env") {
+				auto &variable = audience == OneLakeTokenAudience::Fabric ? credentials.env_fabric_variable
+				                                                          : credentials.env_storage_variable;
+				auto token = ResolveTokenFromContextOrEnv(context, variable);
+				if (!token.empty()) {
+					return token;
+				}
+			} else if (step == "cli") {
+				auto cached = credentials.token_cache.find(scope);
+				if (cached != credentials.token_cache.end() && current_time < cached->second.expiry) {
+					return cached->second.token;
+				}
+				try {
+					Azure::Identity::AzureCliCredential credential;
+					Azure::Core::Credentials::TokenRequestContext request_context;
+					request_context.Scopes = {scope};
+					auto result = credential.GetToken(request_context, Azure::Core::Context());
+					auto micros =
+					    std::chrono::duration_cast<std::chrono::microseconds>(result.ExpiresOn.time_since_epoch())
+					        .count();
+					credentials.token_cache[scope] = {
+					    result.Token, Timestamp::FromEpochMicroSeconds(micros - 60 * Interval::MICROS_PER_SEC)};
+					return result.Token;
+				} catch (const std::exception &) {
+					// Try only the explicitly configured next provider, without exposing SDK diagnostics.
+				}
+			} else {
+				throw InvalidInputException("Unsupported OneLake credential chain step");
+			}
 		}
+		throw IOException("No token available from the configured OneLake credential chain");
+	}
+	auto cache_entry = credentials.token_cache.find(scope);
+	if (cache_entry != credentials.token_cache.end() && current_time < cache_entry->second.expiry) {
+		return cache_entry->second.token;
 	}
 
 	if (credentials.provider != OneLakeCredentialProvider::ServicePrincipal) {
@@ -648,9 +661,9 @@ string OneLakeAPI::GetAccessToken(OneLakeCredentials &credentials, OneLakeTokenA
 
 	// Prepare POST data for client credentials flow
 	post_data = "grant_type=client_credentials";
-	post_data += "&client_id=" + credentials.client_id;
-	post_data += "&client_secret=" + credentials.client_secret;
-	post_data += "&scope=" + scope;
+	post_data += "&client_id=" + UrlEncodeComponent(credentials.client_id);
+	post_data += "&client_secret=" + UrlEncodeComponent(credentials.client_secret);
+	post_data += "&scope=" + UrlEncodeComponent(scope);
 
 	curl_easy_setopt(curl, CURLOPT_URL, token_url.c_str());
 	curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post_data.c_str());
@@ -712,7 +725,7 @@ string OneLakeAPI::MakeAPIRequest(ClientContext &context, const string &url, One
                                   bool allow_not_found) {
 	(void)context;
 
-	string access_token = GetAccessToken(credentials, OneLakeTokenAudience::Fabric);
+	string access_token = GetAccessToken(credentials, OneLakeTokenAudience::Fabric, &context);
 
 	CURL *curl;
 	CURLcode res;

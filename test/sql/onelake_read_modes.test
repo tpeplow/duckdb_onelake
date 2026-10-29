@@ -1,0 +1,52 @@
+# name: test/sql/onelake_read_modes.test
+# description: Validate secured read modes before authentication or file discovery
+# group: [sql]
+
+require onelake
+
+statement error
+ATTACH '00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002' AS invalid_mode (TYPE ONELAKE, READ_MODE 'AUTO');
+----
+READ_MODE must be TABLE_API or DIRECT_FILES
+
+statement error
+ATTACH '00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002' AS invalid_mode (TYPE ONELAKE, READ_MODE NULL);
+----
+NULL is not supported as a valid option
+
+statement ok
+CREATE SECRET read_modes_secret (TYPE ONELAKE, PROVIDER credential_chain, CHAIN 'env');
+
+# GUID attachment is lazy and does not contact the service.
+statement ok
+ATTACH '00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002' AS secured_default (TYPE ONELAKE);
+
+statement ok
+SET VARIABLE AZURE_STORAGE_TOKEN = 'not-a-token';
+
+# The explicit env provider must neither switch to CLI nor fall back to file discovery.
+statement error
+SELECT * FROM secured_default.dbo.unavailable;
+----
+A caller Entra token is required
+
+statement ok
+RESET VARIABLE AZURE_STORAGE_TOKEN;
+
+statement ok
+DETACH secured_default;
+
+statement ok
+ATTACH '00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002' AS secured_explicit (TYPE ONELAKE, READ_MODE 'table_api', READ_ONLY);
+
+statement ok
+DETACH secured_explicit;
+
+statement ok
+ATTACH '00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002' AS legacy_explicit (TYPE ONELAKE, READ_MODE 'direct_files');
+
+statement ok
+DETACH legacy_explicit;
+
+statement ok
+DROP SECRET read_modes_secret;

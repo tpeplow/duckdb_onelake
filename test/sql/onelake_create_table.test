@@ -11,7 +11,7 @@ require-env ONELAKE_TEST_LAKEHOUSE_NAME
 
 # Attach to test workspace
 statement ok
-ATTACH 'onelake://${ONELAKE_TEST_WORKSPACE_ID}' AS onelake_test (TYPE ONELAKE);
+ATTACH 'onelake://${ONELAKE_TEST_WORKSPACE_ID}' AS onelake_test (TYPE ONELAKE, READ_MODE 'DIRECT_FILES');
 
 # Use the test lakehouse
 statement ok

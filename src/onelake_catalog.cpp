@@ -24,13 +24,24 @@
 namespace duckdb {
 
 OneLakeCatalog::OneLakeCatalog(AttachedDatabase &db_p, const string &workspace_id, const string &catalog_name,
-                               OneLakeCredentials credentials, string default_schema_p)
+                               OneLakeCredentials credentials, string default_schema_p, OneLakeReadMode read_mode_p)
     : Catalog(db_p), workspace_id(workspace_id), access_mode(AccessMode::AUTOMATIC),
-      credentials(std::move(credentials)), schemas(*this), default_schema(std::move(default_schema_p)),
-      configured_default_preference(default_schema), user_configured_default(!default_schema.empty()) {
+      credentials(std::move(credentials)), read_mode(read_mode_p), schemas(*this),
+      default_schema(std::move(default_schema_p)), configured_default_preference(default_schema),
+      user_configured_default(!default_schema.empty()) {
+	if (UsesTableAPI()) {
+		default_schema.clear();
+	}
 }
 
 OneLakeCatalog::~OneLakeCatalog() = default;
+
+void OneLakeCatalog::RequireWriteSupport() const {
+	if (UsesTableAPI()) {
+		throw NotImplementedException(
+		    "TABLE_API attachments are currently read-only: independent file-write authorization is not implemented");
+	}
+}
 
 void OneLakeCatalog::Initialize(bool load_builtin) {
 	// OneLake catalogs don't need built-in schema initialization
@@ -41,6 +52,7 @@ optional_ptr<CatalogEntry> OneLakeCatalog::CreateSchema(CatalogTransaction trans
 }
 
 void OneLakeCatalog::DropSchema(ClientContext &context, DropInfo &info) {
+	RequireWriteSupport();
 	return schemas.DropEntry(context, info);
 }
 
@@ -52,15 +64,15 @@ optional_ptr<SchemaCatalogEntry> OneLakeCatalog::LookupSchema(CatalogTransaction
                                                               const EntryLookupInfo &schema_lookup,
                                                               OnEntryNotFound if_not_found) {
 	if (schema_lookup.GetEntryName() == DEFAULT_SCHEMA) {
-		if (default_schema.empty() && transaction.HasContext()) {
+		if (!HasDefaultSchema() && transaction.HasContext()) {
 			auto &context = transaction.GetContext();
 			schemas.Scan(context, [&](CatalogEntry &schema) {
-				if (default_schema.empty()) {
-					default_schema = schema.name;
+				if (!HasDefaultSchema()) {
+					SetDefaultSchema(schema.name);
 				}
 			});
 		}
-		if (default_schema.empty()) {
+		if (!HasDefaultSchema()) {
 			if (if_not_found == OnEntryNotFound::RETURN_NULL) {
 				return nullptr;
 			}
@@ -68,7 +80,7 @@ optional_ptr<SchemaCatalogEntry> OneLakeCatalog::LookupSchema(CatalogTransaction
 			    "Attempting to fetch the default schema - but no default lakehouse was provided in the connection "
 			    "string");
 		}
-		return GetSchema(transaction, default_schema, if_not_found);
+		return GetSchema(transaction, GetDefaultSchema(), if_not_found);
 	}
 	auto entry = schemas.GetEntry(transaction.GetContext(), schema_lookup.GetEntryName());
 	if (!entry && if_not_found != OnEntryNotFound::RETURN_NULL) {
@@ -97,6 +109,7 @@ void OneLakeCatalog::ClearCache() {
 
 PhysicalOperator &OneLakeCatalog::PlanCreateTableAs(ClientContext &context, PhysicalPlanGenerator &planner,
                                                     LogicalCreateTable &op, PhysicalOperator &plan) {
+	RequireWriteSupport();
 	if (op.children.empty()) {
 		throw InternalException("PlanCreateTableAs invoked without a projection plan");
 	}
@@ -111,6 +124,7 @@ PhysicalOperator &OneLakeCatalog::PlanCreateTableAs(ClientContext &context, Phys
 
 PhysicalOperator &OneLakeCatalog::PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner, LogicalInsert &op,
                                              optional_ptr<PhysicalOperator> plan) {
+	RequireWriteSupport();
 	if (!plan) {
 		throw NotImplementedException("INSERT ... DEFAULT VALUES is not supported for OneLake tables yet");
 	}
@@ -131,6 +145,7 @@ PhysicalOperator &OneLakeCatalog::PlanInsert(ClientContext &context, PhysicalPla
 
 PhysicalOperator &OneLakeCatalog::PlanDelete(ClientContext &context, PhysicalPlanGenerator &planner, LogicalDelete &op,
                                              PhysicalOperator &plan) {
+	RequireWriteSupport();
 	// We do not support DELETE ... RETURNING for OneLake
 	if (op.return_chunk) {
 		throw NotImplementedException("DELETE ... RETURNING is not supported for OneLake tables");
@@ -247,12 +262,14 @@ PhysicalOperator &PlanOneLakeUpdateInternal(OneLakeCatalog &catalog, ClientConte
 
 PhysicalOperator &OneLakeCatalog::PlanUpdate(ClientContext &context, PhysicalPlanGenerator &planner, LogicalUpdate &op,
                                              PhysicalOperator &plan) {
+	RequireWriteSupport();
 	(void)plan;
 	return PlanOneLakeUpdateInternal(*this, context, planner, op);
 }
 
 PhysicalOperator &OneLakeCatalog::PlanUpdate(ClientContext &context, PhysicalPlanGenerator &planner,
                                              LogicalUpdate &op) {
+	RequireWriteSupport();
 	return PlanOneLakeUpdateInternal(*this, context, planner, op);
 }
 
@@ -263,14 +280,17 @@ unique_ptr<LogicalOperator> OneLakeCatalog::BindCreateIndex(Binder &binder, Crea
 }
 
 bool OneLakeCatalog::HasDefaultSchema() const {
+	lock_guard<mutex> guard(default_schema_lock);
 	return !default_schema.empty();
 }
 
 void OneLakeCatalog::SetDefaultSchema(const string &schema_name) {
+	lock_guard<mutex> guard(default_schema_lock);
 	default_schema = schema_name;
 }
 
 string OneLakeCatalog::GetDefaultSchema() const {
+	lock_guard<mutex> guard(default_schema_lock);
 	return default_schema.empty() ? Catalog::GetDefaultSchema() : default_schema;
 }
 
