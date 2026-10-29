@@ -29,7 +29,9 @@ local-test
 
 # Repo-local files
 .github/copilot-instructions.md
-rust/
+rust/*
+!rust/onelake_table_reader/
+rust/onelake_table_reader/target/
 scripts/delta-write-test.py
 
 #CodeQL

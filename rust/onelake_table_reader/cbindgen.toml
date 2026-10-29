@@ -1,0 +1,12 @@
+language = "C"
+include_guard = "ONELAKE_TABLE_READER_H"
+pragma_once = true
+cpp_compat = true
+usize_is_size_t = true
+after_includes = "typedef struct ArrowArrayStream ArrowArrayStream;"
+
+[parse]
+parse_deps = false
+
+[export.rename]
+"FFI_ArrowArrayStream" = "ArrowArrayStream"
