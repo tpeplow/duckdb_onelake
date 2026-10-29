@@ -127,10 +127,13 @@ requires the supported service snapshot/effective-authorization validator.
 
 ## Rust table reader
 
-ATTACH defaults to the secured reader. The explicit `DIRECT_FILES` mode retains
-the legacy scan path. `sql/onelake_read_modes.test` covers mode validation and
-lazy attachment without contacting Fabric. Existing remote-write examples must
-explicitly select DIRECT_FILES until independently authorized writes are implemented.
+ATTACH defaults to the existing `DIRECT_FILES` reader. Secured Arrow tests must
+explicitly select `READ_MODE 'TABLE_API'`; neither mode falls back to the other.
+`sql/onelake_read_modes.test` covers mode validation, READ_ONLY enforcement,
+default-mode cache rejection and lazy attachment without contacting Fabric.
+The native cache suite checks the catalog selected by omitted/explicit modes.
+DIRECT_FILES retains existing write behavior, even when selected by omission;
+TABLE_API writes remain blocked until independently authorized writes are implemented.
 
 The opt-in SQL test `sql/onelake_table_api_live.test` requires
 `ONELAKE_LIVE_READ_APPROVED=true`, `ONELAKE_TEST_WORKSPACE`, `ONELAKE_TEST_ITEM`,
