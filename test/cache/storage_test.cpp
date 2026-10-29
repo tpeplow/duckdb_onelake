@@ -9,6 +9,7 @@
 
 using namespace duckdb;
 
+void TestCachedScan(DuckDB &db);
 static void Require(bool condition, const char *message) {
 	if (!condition) {
 		throw std::runtime_error(message);
@@ -197,6 +198,7 @@ int main(int argc, char **argv) {
 		DuckDB db(nullptr, &config);
 		RegisterOneLakeCacheStorage(*db.instance);
 		TestParquet(db);
+		TestCachedScan(db);
 		TestSpill(db);
 		return 0;
 	} catch (const std::exception &error) {

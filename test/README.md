@@ -36,24 +36,65 @@ is only impossible when the selected data's maximum is at most one billion.
 Wall time includes SQL binding/execution; no Rust wire-byte or per-query memory
 measurement is implied. Keep generated reports outside the repository.
 
-## Managed-cache storage prototype
+## Guarded Arrow-to-Parquet cache (experimental)
+
+`READ_CACHE 'OFF'` is the default. Request the experimental path with:
+
+```sql
+ATTACH '<workspace-guid>/<item-guid>' AS lake
+    (TYPE ONELAKE, READ_MODE 'TABLE_API', READ_CACHE 'PARQUET', READ_ONLY);
+```
+
+`PARQUET` is rejected with `DIRECT_FILES`. Setting
+`enable_external_file_cache=false` bypasses this cache too.
+**Live OneLake reads currently always miss and do not fill.** The deployed
+read-allocation contract provides no supported validator for both the exact
+source snapshot and effective authorization. The live adapter supplies none;
+a TTL, matching token, schema or file version is not a substitute. There is
+no SQL override. Normal secured Arrow reads continue without encoding overhead.
 
 Configure with `-DONELAKE_BUILD_CACHE_PROTOTYPE=ON` and build the
 `onelake_cache_storage_test` target. Run it with a new private temporary-directory
 path as its sole argument. It uses synthetic data only: no Fabric access,
-tokens or authorization mocks are required. The executable exercises native
+tokens or external services are required. An in-process source supplies an
+explicit synthetic snapshot/policy validator; this does not prove live safety.
+The executable exercises native
 Parquet COPY/read and incremental Arrow-batch encoding over buffer-managed
 virtual files, preserving the caller's batch ownership and surplus rows.
 It covers cross-connection isolation, external-file range invalidation without
 flushing unrelated entries, spill limits and cleanup. Native file validity is
-not a source-completeness or authorization proof.
+not a source-completeness or authorization proof. SQL integration cases cover
+complete and empty hits, prepared authorization checks, changed snapshots and
+policies, projection/filter mapping, partial coverage, cancellation, pressure,
+and failures during initialization and before/after output. They print controlled
+uncached/fill/hit timings and execution-stream/batch counts. These synthetic
+timings include no network latency, are not live-cache speedups, and should be
+repeated without concurrent builds for comparisons.
 
-This is not a reusable TABLE_API cache yet. No live Arrow data is retained, no
-new SQL cache setting is enabled, and ordinary OneLake reads remain unchanged.
-The prototype uses DuckDB's existing Parquet writer rather than adding a second
-encoder with independently allocated row-group/compression buffers. Working
-storage tests do not establish the missing source/authorization validator or
-complete the remaining memory/privacy and guarded-scan integration gates.
+The adapter encodes each received batch through DuckDB's registered Parquet
+writer, retaining surplus rows without downloading subsequent batches for LIMIT.
+It marks a source complete only at EOF. An incomplete entry can answer only a
+proven simple unordered column projection with a finite constant LIMIT and
+sufficient rows; unsupported shapes or disabled optimization miss.
+Every hit checks identity and revalidates before native Parquet initialization,
+including metadata-only COUNT and impossible predicates. Simple copied predicates
+enable native filtering while the original SQL predicates remain residual.
+Guarded files can be opened only inside that scan's scoped native callbacks;
+direct `read_parquet()` calls cannot use a discovered private path to skip
+revalidation. The current adapter is single-threaded; future asynchronous child
+readers must propagate this permission scope explicitly, not weaken it.
+Cache-local fill errors discard the entry and continue the same Arrow stream.
+Cache-read errors can fall back to a fresh authorized stream only before any
+output; after output they fail the query, never replaying it.
+
+Files and manifests are connection-private. Data blocks and the block index use
+DuckDB memory/spill accounting; normal cleanup does not promise secure erasure.
+The current geometry (one fragment per received batch, 2,048-row groups, Snappy)
+is untuned. Encoding performs an additional Arrow-to-DuckDB conversion. Metadata
+and allocator overhead are not a strict process-RSS bound. Before enabling live
+retention, establish the service validator, private spill-directory admission,
+complete accounting, and attachment-retirement handling. These remain production
+gates, not capabilities established by synthetic tests.
 
 ## Rust table reader
 

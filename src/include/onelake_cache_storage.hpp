@@ -12,7 +12,7 @@ class ArrowTableSchema;
 // Prototype storage only: no service result can become a reusable cache entry here.
 class OneLakeCachedFile {
 public:
-	explicit OneLakeCachedFile(BufferManager &manager);
+	explicit OneLakeCachedFile(BufferManager &manager, bool guarded = false);
 	~OneLakeCachedFile();
 
 	void Append(const_data_ptr_t data, idx_t size);
@@ -21,8 +21,12 @@ public:
 	void Seal();
 	idx_t Size();
 	bool Sealed();
+	bool Guarded() const {
+		return guarded;
+	}
 
 private:
+	const bool guarded;
 	BufferManager &manager;
 	mutex lock;
 	vector<shared_ptr<BlockHandle>> blocks;
@@ -39,7 +43,7 @@ public:
 	~OneLakeCacheStorage() override;
 
 	static shared_ptr<OneLakeCacheStorage> Get(ClientContext &context);
-	string Create();
+	string Create(bool guarded = false);
 	shared_ptr<OneLakeCachedFile> Lookup(const string &path);
 	void Seal(const string &path);
 	void Remove(const string &path);
@@ -53,9 +57,22 @@ private:
 
 void RegisterOneLakeCacheStorage(DatabaseInstance &db);
 
+// Only the validated scan adapter may open guarded files, including for metadata.
+class OneLakeCacheReadScope {
+public:
+	explicit OneLakeCacheReadScope(const vector<string> *paths);
+	~OneLakeCacheReadScope();
+	OneLakeCacheReadScope(const OneLakeCacheReadScope &) = delete;
+	OneLakeCacheReadScope &operator=(const OneLakeCacheReadScope &) = delete;
+
+private:
+	const vector<string> *previous;
+};
+
 class OneLakeParquetFragment {
 public:
-	OneLakeParquetFragment(ClientContext &context, const vector<string> &names, const vector<LogicalType> &types);
+	OneLakeParquetFragment(ClientContext &context, const vector<string> &names, const vector<LogicalType> &types,
+	                       bool guarded = false);
 	~OneLakeParquetFragment();
 
 	void Append(DataChunk &chunk);
