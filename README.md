@@ -73,16 +73,36 @@ available through DIRECT_FILES attachments (including the default) without
 READ_ONLY, subject to their existing limitations, service permissions and
 destructive-operation guards. The read-mode examples above use READ_ONLY to block writes.
 
-`READ_CACHE 'PARQUET'` is a separate, experimental cache of authorized Arrow
-results, not the default direct-file reader. It requires explicit
-`READ_MODE 'TABLE_API'`; requesting it without that mode is an error. The cache
-defaults to OFF. Live Arrow retention remains disabled until a supported source
-snapshot and effective-authorization validator is available; requesting PARQUET
-currently still reads fresh Arrow streams. See the [cache instructions](test/README.md#guarded-arrow-to-parquet-cache-experimental).
+`READ_CACHE 'PARQUET'` is an experimental, connection-local cache of previously
+authorized Arrow results, not the default direct-file reader. **Caching is OFF
+by default.** Leave it OFF when each query must obtain fresh service-authorized
+data: cached rows can outlive data or security-policy changes. A matching identity
+and fresh schema do not prove that row-level permissions are unchanged.
+
+```sql
+-- No local result reuse (also the default).
+ATTACH '<workspace-id>/<item-id>' AS fresh
+    (TYPE ONELAKE, READ_MODE 'TABLE_API', READ_CACHE 'OFF', READ_ONLY);
+
+-- Accept stale data and authorization results within an explicit cache window.
+ATTACH '<workspace-id>/<item-id>' AS cached
+    (TYPE ONELAKE, READ_MODE 'TABLE_API', READ_CACHE 'PARQUET',
+     READ_CACHE_TTL_SECONDS 300, READ_ONLY);
+```
+
+PARQUET requires TABLE_API and a positive integer `READ_CACHE_TTL_SECONDS`.
+This time-to-live (TTL) has no default; 300 seconds is an example. Existing PARQUET requests without a
+TTL now fail. TTL is measured from the execution read's start, includes filling
+the cache, and is never extended by hits. Expiry prevents new hits; already-running
+queries may finish. This is not immediate revocation enforcement or secure
+deletion. The extension does not call the administrative dataAccessRoles API.
+See the [cache instructions](test/README.md#guarded-arrow-to-parquet-cache-experimental)
+for private storage requirements and normal cleanup.
 
 Schema binding allocates a read session with the column option omitted, reads its
-Arrow schema, and closes it without consuming rows. Execution allocates a fresh
-session with the required columns. Binding therefore incurs additional billed
+Arrow schema, and closes it without consuming rows. An uncached execution allocates
+a fresh session with the required columns; a cache hit skips that execution allocation.
+Binding therefore incurs additional billed
 `POST /read` operations, including for metadata-only queries. Prepared statements
 do not retain a read session; the current unversioned catalog also makes DuckDB
 rebind on EXECUTE, including schema probes. A changed projected schema fails
@@ -94,7 +114,7 @@ Projection is pushed to OneLake; filters, joins, aggregates and LIMIT execute in
 DuckDB. COUNT(*) reads authorized rows rather than using catalog row counts,
 using a narrow authorized primitive column when available.
 Streams run sequentially and all must finish for a complete result. LIMIT can
-stop early, although the service may return a large batch first. Bind/execution
+stop early, although the service may return a large batch first. Bind/uncached execution
 are separate snapshots; there is no cross-query snapshot guarantee.
 
 The attachment pins the token's tenant/object identity. `CHAIN 'cli'` uses only

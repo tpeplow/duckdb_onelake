@@ -135,20 +135,46 @@ not the C++ counters or live transport.
 
 ## Guarded Arrow-to-Parquet cache (experimental)
 
-`READ_CACHE 'OFF'` is the default. Request the experimental path with:
+The experimental cache reuses previously authorized Arrow results as local
+Parquet fragments. `READ_CACHE 'OFF'` is the default and disables both fill and
+reuse. Keep it OFF when every query must obtain fresh service-authorized data:
+
+```sql
+ATTACH '<workspace-guid>/<item-guid>' AS fresh
+    (TYPE ONELAKE, READ_MODE 'TABLE_API', READ_CACHE 'OFF', READ_ONLY);
+```
+
+To accept bounded-staleness reuse, supply an explicit positive integer
+time-to-live (TTL) in seconds:
 
 ```sql
 ATTACH '<workspace-guid>/<item-guid>' AS lake
-    (TYPE ONELAKE, READ_MODE 'TABLE_API', READ_CACHE 'PARQUET', READ_ONLY);
+    (TYPE ONELAKE, READ_MODE 'TABLE_API', READ_CACHE 'PARQUET',
+     READ_CACHE_TTL_SECONDS 300, READ_ONLY);
 ```
 
-`PARQUET` is rejected with `DIRECT_FILES`. Setting
-`enable_external_file_cache=false` bypasses this cache too.
-**Live OneLake reads currently always miss and do not fill.** The deployed
-read-allocation contract provides no supported validator for both the exact
-source snapshot and effective authorization. The live adapter supplies none;
-a TTL, matching token, schema or file version is not a substitute. There is
-no SQL override. Normal secured Arrow reads continue without encoding overhead.
+300 seconds is an example, not a default. PARQUET requires TABLE_API and an
+explicit TTL; older PARQUET attachments without one now fail. Zero, negative,
+fractional, nonnumeric, NULL and overflowing values are rejected, as is a TTL
+with OFF. The TTL is fixed for the attachment. Setting
+`enable_external_file_cache=false` bypasses both fill and reuse.
+
+**TTL does not validate current data or effective permissions.** Previously
+authorized rows can remain readable after data, RLS or other access changes.
+Identity checks and fresh schema binding remain, but an unchanged schema cannot
+detect every policy change. The administrative dataAccessRoles API is not called;
+TTL caching needs no additional administrative permission beyond normal read
+authorization. Leave caching OFF if this staleness is unacceptable. Fresh reads
+still follow the service's own authorization and propagation semantics.
+
+The monotonic deadline starts immediately before opening the execution read.
+Allocation, transfer and encoding consume the TTL; hits and schema probes never
+renew it. Before each hit, an expired entry is removed and a fresh Arrow read
+starts. A fill that expires stops retaining data and continues its original
+stream without replay. A cached query admitted before expiry may finish afterward.
+TTL therefore bounds admission age, not completion time or absolute source-data
+age. Idle expired storage may be reclaimed lazily on access or normal cleanup;
+there is no background polling or secure-erasure guarantee.
 
 Configure with `-DONELAKE_BUILD_CACHE_PROTOTYPE=ON` and build the
 `onelake_cache_storage_test` target. Run it with an existing, empty, private
@@ -182,12 +208,12 @@ writer, retaining surplus rows without downloading subsequent batches for LIMIT.
 It marks a source complete only at EOF. An incomplete entry can answer only a
 proven simple unordered column projection with a finite constant LIMIT and
 sufficient rows; unsupported shapes or disabled optimization miss.
-Every hit checks identity and revalidates before native Parquet initialization,
+Every hit checks identity, attachment lifetime and expiry before native Parquet initialization,
 including metadata-only COUNT and impossible predicates. Simple copied predicates
 enable native filtering while the original SQL predicates remain residual.
 Guarded files can be opened only inside that scan's scoped native callbacks;
 direct `read_parquet()` calls cannot use a discovered private path to skip
-revalidation. The current adapter is single-threaded; future asynchronous child
+these checks. The current adapter is single-threaded; future asynchronous child
 readers must propagate this permission scope explicitly, not weaken it.
 Cache-local fill errors discard the entry and continue the same Arrow stream.
 Cache-read errors can fall back to a fresh authorized stream only before any
@@ -219,8 +245,11 @@ directory permissions or spill configuration while retained data exists.
 The current geometry (one fragment per received batch, 2,048-row groups, Snappy)
 is untuned. Encoding performs an additional Arrow-to-DuckDB conversion.
 The local production gates are implemented and tested on Windows; POSIX runtime
-validation remains part of the cross-platform release work. Live retention still
-requires the supported service snapshot/effective-authorization validator.
+validation remains part of the cross-platform release work. Deterministic tests
+cover TTL boundaries, non-sliding hits, allocation/fill expiry, already-admitted
+readers, OFF and disabled external caching. The separate synthetic authoritative
+validator tests remain; no equivalent live snapshot/effective-permission validator
+has been established. TTL is an explicitly weaker alternative, not that validator.
 
 ## Rust table reader
 

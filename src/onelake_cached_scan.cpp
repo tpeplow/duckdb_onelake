@@ -42,6 +42,10 @@ struct Entry {
 	Allocator &allocator;
 	OneLakeCachePaths paths;
 	std::function<bool(ClientContext &)> revalidate;
+	std::optional<std::chrono::steady_clock::time_point> expires_at;
+	bool Expired(std::chrono::steady_clock::time_point now) const {
+		return expires_at && now >= *expires_at;
+	}
 	idx_t rows = 0;
 	bool complete = false;
 	atomic<bool> available {false};
@@ -150,12 +154,17 @@ class TeeStream : public ArrowArrayStreamWrapper {
 public:
 	~TeeStream() override {
 		if (entry) {
-			entry->available = true;
+			if (entry->Expired(scan_source->CacheNow())) {
+				Discard();
+			} else {
+				entry->available = true;
+			}
 		}
 	}
 	TeeStream(ClientContext &context, unique_ptr<ArrowArrayStreamWrapper> &parent, shared_ptr<Entry> entry,
-	          shared_ptr<CacheState> cache, string key)
-	    : context(context), entry(std::move(entry)), cache(std::move(cache)), key(std::move(key)) {
+	          shared_ptr<CacheState> cache, string key, shared_ptr<OneLakeScanSource> scan_source)
+	    : context(context), entry(std::move(entry)), cache(std::move(cache)), key(std::move(key)),
+	      scan_source(std::move(scan_source)) {
 		arrow_array_stream = {};
 		arrow_array_stream.get_schema = [](ArrowArrayStream *stream, ArrowSchema *out) {
 			auto &parent = *static_cast<ArrowArrayStreamWrapper *>(stream->private_data);
@@ -190,6 +199,10 @@ public:
 			return batch;
 		}
 		try {
+			if (entry->Expired(scan_source->CacheNow())) {
+				Discard();
+				return batch;
+			}
 			entry->paths.reserve(entry->paths.size() + 1);
 			if (!batch->arrow_array.release) {
 				if (entry->paths.empty()) {
@@ -202,6 +215,9 @@ public:
 				fragment.AppendArrowBatch(batch, table);
 				Keep(fragment);
 				entry->rows += idx_t(batch->arrow_array.length);
+			}
+			if (entry->Expired(scan_source->CacheNow())) {
+				Discard();
 			}
 		} catch (...) {
 			Discard();
@@ -233,6 +249,7 @@ private:
 	shared_ptr<Entry> entry;
 	shared_ptr<CacheState> cache;
 	string key;
+	shared_ptr<OneLakeScanSource> scan_source;
 	ArrowTableSchema table;
 };
 
@@ -309,12 +326,14 @@ void StartArrow(ClientContext &context, const BindData &data, GlobalState &state
 	    !SameLayout(*data.schema_root.arrow_schema.children[data.count_column], *actual.arrow_schema.children[0])) {
 		throw IOException("OneLake Arrow layout changed between binding and execution; rebind the query");
 	}
-	if (allow_fill && opened.revalidate && Enabled(context, data)) {
+	if (allow_fill && (opened.revalidate || opened.cache_expires_at) &&
+	    (!opened.cache_expires_at || data.source->CacheNow() < *opened.cache_expires_at) && Enabled(context, data)) {
 		try {
 			auto entry = MakeCacheShared<Entry>(BufferAllocator::Get(context), context);
 			entry->revalidate = std::move(opened.revalidate);
+			entry->expires_at = opened.cache_expires_at;
 			state.cache->Put(state.key, entry);
-			auto tee = make_uniq<TeeStream>(context, opened.stream, entry, state.cache, state.key);
+			auto tee = make_uniq<TeeStream>(context, opened.stream, entry, state.cache, state.key, data.source);
 			opened.stream = std::move(tee);
 		} catch (...) {
 			state.cache->Erase(state.key);
@@ -412,7 +431,8 @@ unique_ptr<GlobalTableFunctionState> Init(ClientContext &context, TableFunctionI
 			valid =
 			    enabled && entry->available &&
 			    (entry->complete || (data.partial_limit.IsValid() && entry->rows >= data.partial_limit.GetIndex())) &&
-			    entry->revalidate && entry->revalidate(context);
+			    !entry->Expired(data.source->CacheNow()) &&
+			    (entry->revalidate ? entry->revalidate(context) : entry->expires_at.has_value());
 		} catch (...) {
 		}
 		if (valid) {

@@ -138,9 +138,16 @@ public:
 	OneLakeOpenedRead Open(ClientContext &context, const vector<string> &columns) override {
 		CheckIdentity(context);
 		OneLakeOpenedRead result;
+		const auto started = CacheNow();
+		const auto ttl = catalog.ReadCacheTTLSeconds();
+		if (catalog.UsesReadCache() && !columns.empty() && ttl > 0 &&
+		    ttl <=
+		        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::time_point::max() - started)
+		            .count()) {
+			result.cache_expires_at = started + std::chrono::seconds(ttl);
+		}
 		result.stream = make_uniq<TableReadStream>(context, catalog.GetCredentials(), target, columns);
-		// The deployed read allocation has no supported snapshot/authorization validator.
-		// An absent validator deliberately prevents both filling and serving live cache entries.
+		// TTL reuse explicitly accepts stale data/policy; no authoritative validator is claimed.
 		return result;
 	}
 

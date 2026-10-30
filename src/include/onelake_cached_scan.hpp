@@ -2,6 +2,8 @@
 
 #include "duckdb/common/arrow/arrow_wrapper.hpp"
 #include "duckdb/function/table_function.hpp"
+#include <chrono>
+#include <optional>
 
 namespace duckdb {
 
@@ -22,8 +24,10 @@ private:
 struct OneLakeOpenedRead {
 	unique_ptr<ArrowArrayStreamWrapper> stream;
 	// Must validate the exact snapshot AND effective authorization of this allocation.
-	// Empty means unsupported: neither fill nor reuse is allowed.
+	// Without this validator or an explicit TTL, neither fill nor reuse is allowed.
 	std::function<bool(ClientContext &)> revalidate;
+	// Explicit bounded-staleness policy, not an authorization or source-version validator.
+	std::optional<std::chrono::steady_clock::time_point> cache_expires_at;
 };
 
 class OneLakeScanSource {
@@ -33,6 +37,9 @@ public:
 	virtual OneLakeCacheLifetime &Lifetime() const = 0;
 	virtual void CheckIdentity(ClientContext &context) = 0;
 	virtual OneLakeOpenedRead Open(ClientContext &context, const vector<string> &columns) = 0;
+	virtual std::chrono::steady_clock::time_point CacheNow() const noexcept {
+		return std::chrono::steady_clock::now();
+	}
 };
 
 TableFunction OneLakeCachedScanFunction();

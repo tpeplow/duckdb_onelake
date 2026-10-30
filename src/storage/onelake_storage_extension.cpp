@@ -11,6 +11,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/value.hpp"
 #include <vector>
+#include <chrono>
 
 namespace duckdb {
 
@@ -266,8 +267,22 @@ unique_ptr<Catalog> OneLakeStorageExtension::AttachInternal(optional_ptr<Storage
 
 	OneLakeReadMode read_mode = OneLakeReadMode::DIRECT_FILES;
 	bool read_cache = false;
+	int64_t read_cache_ttl_seconds = 0;
+	bool has_cache_ttl = false;
 	// Validate the mode before performing authentication or discovery.
 	for (auto &option : info.options) {
+		if (StringUtil::CIEquals(option.first, "read_cache_ttl_seconds")) {
+			has_cache_ttl = true;
+			if (option.second.IsNull() || !option.second.type().IsIntegral()) {
+				throw InvalidInputException("READ_CACHE_TTL_SECONDS must be a positive integer");
+			}
+			read_cache_ttl_seconds = option.second.GetValue<int64_t>();
+			auto remaining = std::chrono::steady_clock::time_point::max() - std::chrono::steady_clock::now();
+			if (read_cache_ttl_seconds <= 0 ||
+			    read_cache_ttl_seconds > std::chrono::duration_cast<std::chrono::seconds>(remaining).count()) {
+				throw InvalidInputException("READ_CACHE_TTL_SECONDS must be positive and fit the monotonic clock");
+			}
+		}
 		if (StringUtil::CIEquals(option.first, "read_cache")) {
 			if (!option.second.IsNull() && StringUtil::CIEquals(option.second.ToString(), "PARQUET")) {
 				read_cache = true;
@@ -292,6 +307,12 @@ unique_ptr<Catalog> OneLakeStorageExtension::AttachInternal(optional_ptr<Storage
 
 	if (read_cache && read_mode != OneLakeReadMode::TABLE_API) {
 		throw InvalidInputException("READ_CACHE PARQUET requires READ_MODE TABLE_API");
+	}
+	if (read_cache && !has_cache_ttl) {
+		throw InvalidInputException("READ_CACHE PARQUET requires an explicit positive READ_CACHE_TTL_SECONDS");
+	}
+	if (has_cache_ttl && !read_cache) {
+		throw InvalidInputException("READ_CACHE_TTL_SECONDS requires READ_CACHE PARQUET");
 	}
 
 	// Try to auto-create secrets from environment variables on every attach
@@ -333,7 +354,7 @@ unique_ptr<Catalog> OneLakeStorageExtension::AttachInternal(optional_ptr<Storage
 	}
 
 	return make_uniq<OneLakeCatalog>(db, workspace_id, name, std::move(credentials), std::move(default_lakehouse),
-	                                 read_mode, read_cache);
+	                                 read_mode, read_cache, read_cache_ttl_seconds);
 }
 
 unique_ptr<TransactionManager>

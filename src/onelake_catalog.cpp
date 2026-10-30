@@ -26,9 +26,10 @@ namespace duckdb {
 
 OneLakeCatalog::OneLakeCatalog(AttachedDatabase &db_p, const string &workspace_id, const string &catalog_name,
                                OneLakeCredentials credentials, string default_schema_p, OneLakeReadMode read_mode_p,
-                               bool read_cache_p)
+                               bool read_cache_p, int64_t read_cache_ttl_seconds_p)
     : Catalog(db_p), workspace_id(workspace_id), access_mode(AccessMode::AUTOMATIC),
       credentials(std::move(credentials)), read_mode(read_mode_p), read_cache(read_cache_p),
+      read_cache_ttl_seconds(read_cache_ttl_seconds_p),
       read_cache_lifetime(make_shared_ptr<OneLakeCacheLifetime>(db_p.GetDatabase())), schemas(*this),
       default_schema(std::move(default_schema_p)), configured_default_preference(default_schema),
       user_configured_default(!default_schema.empty()) {

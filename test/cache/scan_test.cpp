@@ -37,6 +37,11 @@ struct Fixture {
 	vector<string> requested;
 	bool null_carrier = false;
 	bool drift = false;
+	bool ttl_cache = false;
+	std::chrono::steady_clock::time_point now {std::chrono::seconds(100)};
+	std::chrono::seconds ttl {10};
+	std::chrono::seconds open_time {0};
+	std::chrono::seconds batch_time {0};
 };
 
 class Stream : public ArrowArrayStreamWrapper {
@@ -95,6 +100,7 @@ public:
 		}
 		offset += chunk.size();
 		++fixture->batches;
+		fixture->now += fixture->batch_time;
 		ArrowConverter::ToArrowArray(chunk, &result->arrow_array, properties, {});
 		return result;
 	}
@@ -123,8 +129,12 @@ public:
 			throw IOException("Synthetic access denied");
 		}
 	}
+	std::chrono::steady_clock::time_point CacheNow() const noexcept override {
+		return fixture->now;
+	}
 	OneLakeOpenedRead Open(ClientContext &context, const vector<string> &columns) override {
 		CheckIdentity(context);
+		auto started = CacheNow();
 		if (!columns.empty()) {
 			++fixture->opens;
 			fixture->requested = columns;
@@ -135,6 +145,10 @@ public:
 			++fixture->probes;
 		}
 		OneLakeOpenedRead opened;
+		if (!columns.empty() && fixture->ttl_cache) {
+			opened.cache_expires_at = started + fixture->ttl;
+			fixture->now += fixture->open_time;
+		}
 		opened.stream = make_uniq<Stream>(context, fixture, columns.empty() ? fixture->names : columns);
 		if (fixture->validation) {
 			auto version = fixture->version;
@@ -154,11 +168,13 @@ struct Info : TableFunctionInfo {
 	explicit Info(shared_ptr<Source> source) : source(std::move(source)) {
 	}
 	shared_ptr<Source> source;
+	bool cache_enabled = true;
 };
 
 unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input, vector<LogicalType> &types,
                               vector<string> &names) {
-	return BindOneLakeCachedScan(context, static_cast<Info &>(*input.info).source, true, names, types);
+	auto &info = static_cast<Info &>(*input.info);
+	return BindOneLakeCachedScan(context, info.source, info.cache_enabled, names, types);
 }
 
 unique_ptr<MaterializedQueryResult> Query(Connection &connection, const string &sql) {
@@ -232,9 +248,13 @@ int64_t Scalar(Connection &connection, const string &sql) {
 table_function_t parquet_scan;
 int fail_after = -1;
 idx_t parquet_rows = 0;
+Fixture *advance_on_parquet = nullptr;
 void InstrumentedParquet(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
 	if (fail_after == 0) {
 		throw IOException("Synthetic cached read failure");
+	}
+	if (advance_on_parquet) {
+		advance_on_parquet->now += std::chrono::seconds(100);
 	}
 	parquet_scan(context, input, output);
 	parquet_rows += output.size();
@@ -345,6 +365,102 @@ void TestCountProjection(DuckDB &db) {
 	Query(connection, "SET enable_external_file_cache=true");
 	std::cout << "Narrow count projection, NULLs, filters, LIMIT, cache and schema drift passed\n";
 }
+
+void TestTTL(DuckDB &db) {
+	auto fixture = make_shared_ptr<Fixture>();
+	fixture->lifetime = make_shared_ptr<OneLakeCacheLifetime>(*db.instance);
+	fixture->validation = false;
+	fixture->ttl_cache = true;
+	auto info = make_shared_ptr<Info>(make_shared_ptr<Source>(fixture));
+	auto function = OneLakeCachedScanFunction();
+	function.name = "ttl_fixture";
+	function.bind = Bind;
+	function.function_info = info;
+	ExtensionLoader loader(*db.instance, "ttl_tests");
+	loader.RegisterFunction(std::move(function));
+	Connection connection(db);
+	const string sum = "SELECT sum(Price)::BIGINT FROM ttl_fixture()";
+	Check(Scalar(connection, sum) == 33550336, "TTL fill failed");
+	auto opens = fixture->opens;
+	fixture->now += std::chrono::seconds(9);
+	++fixture->version;
+	Check(Scalar(connection, sum) == 33550336 && fixture->opens == opens,
+	      "TTL did not reuse its explicitly stale snapshot before expiry");
+	fixture->now += std::chrono::seconds(1);
+	Check(Scalar(connection, sum) == 852750336 && fixture->opens == opens + 1,
+	      "Deadline equality served stale data or a hit renewed the deadline");
+	opens = fixture->opens;
+	fixture->now += std::chrono::seconds(11);
+	Query(connection, sum);
+	Check(fixture->opens == opens + 1, "After-deadline lookup reused expired data");
+
+	Connection partial(db);
+	Query(partial, "SELECT Price FROM ttl_fixture() LIMIT 10");
+	opens = fixture->opens;
+	fixture->now += std::chrono::seconds(9);
+	Query(partial, "SELECT Price FROM ttl_fixture() LIMIT 10");
+	Check(fixture->opens == opens, "Valid partial TTL entry did not hit");
+	fixture->now += std::chrono::seconds(1);
+	Query(partial, "SELECT Price FROM ttl_fixture() LIMIT 10");
+	Check(fixture->opens == opens + 1, "Expired partial entry was reused");
+
+	Connection slow(db);
+	fixture->open_time = fixture->ttl;
+	opens = fixture->opens;
+	Query(slow, sum);
+	Query(slow, sum);
+	Check(fixture->opens == opens + 2, "Read allocation time was excluded from TTL");
+	fixture->open_time = std::chrono::seconds(0);
+	fixture->batch_time = fixture->ttl;
+	opens = fixture->opens;
+	Query(slow, sum);
+	Query(slow, sum);
+	Check(fixture->opens == opens + 2, "Expired fill retained data or replayed the stream");
+	fixture->batch_time = std::chrono::seconds(3);
+	opens = fixture->opens;
+	Query(slow, sum);
+	Query(slow, "SELECT Price FROM ttl_fixture() LIMIT 10");
+	Check(fixture->opens == opens + 2, "Expiry during fill left earlier fragments reusable");
+	fixture->batch_time = std::chrono::seconds(0);
+
+	Connection running(db);
+	Query(running, sum);
+	Query(running, "BEGIN");
+	auto &parquet =
+	    Catalog::GetEntry<TableFunctionCatalogEntry>(*running.context, SYSTEM_CATALOG, DEFAULT_SCHEMA, "parquet_scan")
+	        .functions.GetFunctionReferenceByOffset(0);
+	Query(running, "COMMIT");
+	parquet_scan = parquet.function;
+	parquet.function = InstrumentedParquet;
+	advance_on_parquet = fixture.get();
+	opens = fixture->opens;
+	Check(Scalar(running, sum) == 852750336 && fixture->opens == opens,
+	      "An admitted cached query could not finish after its TTL expired");
+	advance_on_parquet = nullptr;
+	parquet.function = parquet_scan;
+	Query(running, sum);
+	Check(fixture->opens == opens + 1, "Post-expiry query reused an admitted reader's generation");
+	fixture->types[0] = LogicalType::BIGINT;
+	Query(running, sum);
+	Check(fixture->opens == opens + 2, "TTL reused a cached projection with a changed type");
+	fixture->granted = false;
+	Check(running.Query(sum)->HasError(), "TTL skipped caller validation");
+	fixture->granted = true;
+
+	info->cache_enabled = false;
+	opens = fixture->opens;
+	Query(connection, sum);
+	Query(connection, sum);
+	Check(fixture->opens == opens + 2, "OFF allowed TTL cache fill or hits");
+	info->cache_enabled = true;
+	Query(connection, "SET enable_external_file_cache=false");
+	opens = fixture->opens;
+	Query(connection, sum);
+	Query(connection, sum);
+	Check(fixture->opens == opens + 2, "External-cache override allowed TTL reuse");
+	Query(connection, "SET enable_external_file_cache=true");
+	std::cout << "TTL boundary, non-sliding hits, fill age, admitted readers and OFF passed\n";
+}
 } // namespace
 
 void TestCatalogRetirement() {
@@ -362,12 +478,14 @@ void TestCatalogRetirement() {
 	Check(!files_catalog.UsesTableAPI(), "Omitted READ_MODE did not select the direct-file catalog path");
 	files_catalog.RequireWriteSupport();
 	Query(connection, "DETACH files_default");
-	Query(connection, "ATTACH '00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002' "
-	                  "AS retirement (TYPE ONELAKE, READ_MODE 'TABLE_API', READ_CACHE 'PARQUET')");
+	Query(connection,
+	      "ATTACH '00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002' "
+	      "AS retirement (TYPE ONELAKE, READ_MODE 'TABLE_API', READ_CACHE 'PARQUET', READ_CACHE_TTL_SECONDS 300)");
 	// Keep the catalog alive after DETACH: cleanup must use the hook, not just destruction.
 	auto attached = DatabaseManager::Get(*db.instance).GetDatabase("retirement");
 	auto &catalog = static_cast<OneLakeCatalog &>(attached->GetCatalog());
 	Check(catalog.UsesTableAPI(), "Explicit TABLE_API did not select the secured catalog path");
+	Check(catalog.ReadCacheTTLSeconds() == 300, "ATTACH TTL was not preserved in the catalog");
 	CreateSchemaInfo schema_info;
 	schema_info.schema = "fixture";
 	OneLakeSchemaEntry schema(catalog, schema_info);
@@ -462,6 +580,7 @@ void TestCatalogRetirement() {
 
 void TestCachedScan(DuckDB &db) {
 	TestCountProjection(db);
+	TestTTL(db);
 	auto fixture = make_shared_ptr<Fixture>();
 	fixture->lifetime = make_shared_ptr<OneLakeCacheLifetime>(*db.instance);
 	auto function = OneLakeCachedScanFunction();

@@ -25,7 +25,8 @@ public:
 	/// @param default_schema The default schema (lakehouse) to use.
 	explicit OneLakeCatalog(AttachedDatabase &db_p, const string &workspace_id, const string &catalog_name,
 	                        OneLakeCredentials credentials, string default_schema = string(),
-	                        OneLakeReadMode read_mode = OneLakeReadMode::DIRECT_FILES, bool read_cache = false);
+	                        OneLakeReadMode read_mode = OneLakeReadMode::DIRECT_FILES, bool read_cache = false,
+	                        int64_t read_cache_ttl_seconds = 0);
 	~OneLakeCatalog() override;
 	void OnDetach(ClientContext &context) override;
 
@@ -69,6 +70,9 @@ public:
 	bool UsesReadCache() const {
 		return read_cache;
 	}
+	int64_t ReadCacheTTLSeconds() const {
+		return read_cache_ttl_seconds;
+	}
 	shared_ptr<OneLakeCacheLifetime> ReadCacheLifetime() const {
 		return read_cache_lifetime;
 	}
@@ -111,6 +115,7 @@ public:
 private:
 	const OneLakeReadMode read_mode;
 	const bool read_cache;
+	const int64_t read_cache_ttl_seconds;
 	const shared_ptr<OneLakeCacheLifetime> read_cache_lifetime;
 	OneLakeSchemaSet schemas;
 	mutable mutex default_schema_lock;
