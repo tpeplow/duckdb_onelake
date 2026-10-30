@@ -87,9 +87,12 @@ session with the required columns. Binding therefore incurs additional billed
 do not retain a read session; the current unversioned catalog also makes DuckDB
 rebind on EXECUTE, including schema probes. A changed projected schema fails
 execution rather than silently converting against stale metadata.
+Catalog lookup hands its schema bind to scan binding once within the same
+statement; this does not retain schema evidence across executions.
 
 Projection is pushed to OneLake; filters, joins, aggregates and LIMIT execute in
-DuckDB. COUNT(*) reads authorized rows rather than using catalog row counts.
+DuckDB. COUNT(*) reads authorized rows rather than using catalog row counts,
+using a narrow authorized primitive column when available.
 Streams run sequentially and all must finish for a complete result. LIMIT can
 stop early, although the service may return a large batch first. Bind/execution
 are separate snapshots; there is no cross-query snapshot guarantee.

@@ -6,6 +6,7 @@
 #include "storage/onelake_path_util.hpp"
 #include "onelake_api.hpp"
 #include "onelake_table_reader.hpp"
+#include "onelake_cached_scan.hpp"
 #include "onelake_logging.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
@@ -18,6 +19,7 @@
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/extension_helper.hpp"
+#include "duckdb/main/client_context_state.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/parser/expression/function_expression.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
@@ -32,6 +34,34 @@ namespace {
 
 constexpr char DELTA_FUNCTION_NAME[] = "delta_scan";
 constexpr char ICEBERG_FUNCTION_NAME[] = "iceberg_scan";
+
+struct PendingTableBind : ClientContextState {
+	const OneLakeTableEntry *table = nullptr;
+	string generation;
+	idx_t query = MAXIMUM_QUERY_ID;
+	unique_ptr<FunctionData> data;
+	unique_ptr<TableFunction> function;
+
+	void QueryEnd() override {
+		data.reset();
+		function.reset();
+		table = nullptr;
+		generation.clear();
+		query = MAXIMUM_QUERY_ID;
+	}
+};
+
+shared_ptr<PendingTableBind> PendingBind(ClientContext &context) {
+	if (!context.transaction.HasActiveTransaction() || context.transaction.GetActiveQuery() == MAXIMUM_QUERY_ID) {
+		return nullptr;
+	}
+	auto state = context.registered_state->GetOrCreate<PendingTableBind>("onelake_pending_table_bind");
+	if (state->query != context.transaction.GetActiveQuery()) {
+		state->QueryEnd();
+		state->query = context.transaction.GetActiveQuery();
+	}
+	return state;
+}
 
 TableFunction ResolveDeltaFunction(ClientContext &context) {
 	auto table_entry = Catalog::GetEntry<TableFunctionCatalogEntry>(context, INVALID_CATALOG, DEFAULT_SCHEMA,
@@ -179,11 +209,23 @@ bool OneLakeTableEntry::EnsureColumnDefinitions(ClientContext &context) {
 	if (!ParentCatalog().Cast<OneLakeCatalog>().UsesTableAPI() && GetColumns().PhysicalColumnCount() > 0) {
 		return true;
 	}
+	auto &catalog = ParentCatalog().Cast<OneLakeCatalog>();
+	auto pending = catalog.UsesTableAPI() ? PendingBind(context) : nullptr;
+	if (pending) {
+		pending->QueryEnd();
+		pending->query = context.transaction.GetActiveQuery();
+	}
 	unique_ptr<FunctionData> temp_bind_data;
 	auto table_function = GetScanFunction(context, temp_bind_data);
 	(void)table_function;
 	if (GetColumns().PhysicalColumnCount() == 0) {
 		throw CatalogException("OneLake table '%s' did not expose any columns after binding", name);
+	}
+	if (pending) {
+		pending->generation = catalog.ReadCacheLifetime()->Id();
+		pending->function = make_uniq<TableFunction>(std::move(table_function));
+		pending->data = std::move(temp_bind_data);
+		pending->table = this;
 	}
 	return true;
 }
@@ -260,18 +302,34 @@ void OneLakeTableEntry::BindUpdateConstraints(Binder &, LogicalGet &, LogicalPro
                                               ClientContext &) {
 }
 
+TableFunction OneLakeTableEntry::BindTableRead(ClientContext &context, unique_ptr<FunctionData> &bind_data,
+                                               vector<string> &names, vector<LogicalType> &types) {
+	auto &catalog = ParentCatalog().Cast<OneLakeCatalog>();
+	auto &schema = ParentSchema().Cast<OneLakeSchemaEntry>();
+	if (!schema.schema_data) {
+		throw InternalException("OneLake table API routing is unavailable");
+	}
+	return BindOneLakeTableRead(context, catalog, *schema.schema_data, schema.name, name, bind_data, names, types);
+}
+
 TableFunction OneLakeTableEntry::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) {
 	std::lock_guard<std::mutex> guard(bind_lock);
 	auto &catalog = ParentCatalog().Cast<OneLakeCatalog>();
 	auto &schema_entry = ParentSchema().Cast<OneLakeSchemaEntry>();
 	if (catalog.UsesTableAPI()) {
-		if (!schema_entry.schema_data) {
-			throw InternalException("OneLake table API routing is unavailable");
+		auto pending = PendingBind(context);
+		if (pending && pending->table == this && pending->generation == catalog.ReadCacheLifetime()->Id() &&
+		    pending->data && pending->function) {
+			auto data = std::move(pending->data);
+			auto function = std::move(pending->function);
+			pending->QueryEnd();
+			CheckOneLakeScanBinding(context, *data);
+			bind_data = std::move(data);
+			return std::move(*function);
 		}
 		vector<string> names;
 		vector<LogicalType> types;
-		auto function = BindOneLakeTableRead(context, catalog, *schema_entry.schema_data, schema_entry.name, name,
-		                                     bind_data, names, types);
+		auto function = BindTableRead(context, bind_data, names, types);
 		if (GetColumns().PhysicalColumnCount() == 0) {
 			UpdateColumnDefinitions(names, types);
 		} else {

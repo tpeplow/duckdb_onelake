@@ -21,6 +21,7 @@
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 
 #include <cstring>
+#include <algorithm>
 
 namespace duckdb {
 namespace {
@@ -94,6 +95,7 @@ struct BindData : ArrowScanFunctionData {
 	bool enabled;
 	optional_idx partial_limit;
 	TableFilterSet advisory_filters;
+	idx_t count_column = 0;
 };
 
 struct GlobalState : GlobalTableFunctionState {
@@ -121,6 +123,7 @@ struct LocalState : LocalTableFunctionState {
 	ThreadContext &thread;
 	optional_ptr<Pipeline> pipeline;
 	unique_ptr<LocalTableFunctionState> child;
+	DataChunk parquet_output;
 };
 
 bool SameLayout(const ArrowSchema &a, const ArrowSchema &b) {
@@ -233,6 +236,38 @@ private:
 	ArrowTableSchema table;
 };
 
+idx_t CountColumn(const ArrowSchema &schema) {
+	idx_t selected = 0;
+	idx_t smallest = NumericLimits<idx_t>::Maximum();
+	for (int64_t i = 0; i < schema.n_children; ++i) {
+		const auto &column = *schema.children[i];
+		if (!column.format || column.dictionary || column.n_children || column.metadata) {
+			continue;
+		}
+		idx_t bits;
+		const string format(column.format);
+		if (format == "b") {
+			bits = 1;
+		} else if (format == "c" || format == "C") {
+			bits = 8;
+		} else if (format == "s" || format == "S" || format == "e") {
+			bits = 16;
+		} else if (format == "i" || format == "I" || format == "f") {
+			bits = 32;
+		} else if (format == "l" || format == "L" || format == "g") {
+			bits = 64;
+		} else {
+			continue;
+		}
+		bits += (column.flags & ARROW_FLAG_NULLABLE) ? 1 : 0;
+		if (bits < smallest) {
+			selected = idx_t(i);
+			smallest = bits;
+		}
+	}
+	return selected;
+}
+
 vector<string> Columns(const BindData &data, const vector<column_t> &ids) {
 	vector<string> names;
 	for (auto id : ids) {
@@ -241,7 +276,7 @@ vector<string> Columns(const BindData &data, const vector<column_t> &ids) {
 		}
 	}
 	if (names.empty()) {
-		names.emplace_back(data.schema_root.arrow_schema.children[0]->name);
+		names.emplace_back(data.schema_root.arrow_schema.children[data.count_column]->name);
 	}
 	return names;
 }
@@ -270,7 +305,8 @@ void StartArrow(ClientContext &context, const BindData &data, GlobalState &state
 		}
 		++projected;
 	}
-	if (projected == 0 && !SameLayout(*data.schema_root.arrow_schema.children[0], *actual.arrow_schema.children[0])) {
+	if (projected == 0 &&
+	    !SameLayout(*data.schema_root.arrow_schema.children[data.count_column], *actual.arrow_schema.children[0])) {
 		throw IOException("OneLake Arrow layout changed between binding and execution; rebind the query");
 	}
 	if (allow_fill && opened.revalidate && Enabled(context, data)) {
@@ -319,6 +355,9 @@ void StartParquet(ClientContext &context, const BindData &data, GlobalState &sta
 	TableFunctionBindInput bind_input(inputs, parameters, input_types, input_names, nullptr, nullptr, state.function,
 	                                  ref);
 	state.parquet_bind = state.function.bind(context, bind_input, types, names);
+	if (state.function.get_virtual_columns) {
+		state.function.get_virtual_columns(context, state.parquet_bind.get());
+	}
 	if (names != Columns(data, state.columns)) {
 		throw IOException("OneLake cached projection changed");
 	}
@@ -326,7 +365,7 @@ void StartParquet(ClientContext &context, const BindData &data, GlobalState &sta
 	idx_t position = 0;
 	for (auto id : state.columns) {
 		if (id == COLUMN_IDENTIFIER_ROW_ID) {
-			ids.push_back(id);
+			ids.push_back(COLUMN_IDENTIFIER_EMPTY);
 		} else {
 			if (types[position] != data.all_types[id]) {
 				throw IOException("OneLake cached type changed");
@@ -396,7 +435,7 @@ vector<column_t> ChildColumns(const GlobalState &state) {
 	vector<column_t> result;
 	idx_t position = 0;
 	for (auto id : state.columns) {
-		result.push_back(id == COLUMN_IDENTIFIER_ROW_ID ? id : position++);
+		result.push_back(id == COLUMN_IDENTIFIER_ROW_ID ? COLUMN_IDENTIFIER_EMPTY : position++);
 	}
 	return result;
 }
@@ -430,7 +469,29 @@ void Scan(ClientContext &context, TableFunctionInput &input, DataChunk &output) 
 	try {
 		OneLakeCacheReadScope scope(state.entry ? &state.entry->paths : nullptr);
 		TableFunctionInput child(state.child_bind, local.child.get(), state.child.get());
-		state.function.function(context, child, output);
+		if (state.entry &&
+		    std::find(state.columns.begin(), state.columns.end(), COLUMN_IDENTIFIER_ROW_ID) != state.columns.end()) {
+			// Parquet exposes an empty BOOLEAN column for row counts, not Arrow's row-id sentinel.
+			if (local.parquet_output.ColumnCount() == 0) {
+				auto types = output.GetTypes();
+				for (idx_t i = 0; i < state.columns.size(); ++i) {
+					if (state.columns[i] == COLUMN_IDENTIFIER_ROW_ID) {
+						types[i] = LogicalType::BOOLEAN;
+					}
+				}
+				local.parquet_output.Initialize(context, types);
+			}
+			local.parquet_output.Reset();
+			state.function.function(context, child, local.parquet_output);
+			output.SetCardinality(local.parquet_output.size());
+			for (idx_t i = 0; i < state.columns.size(); ++i) {
+				if (state.columns[i] != COLUMN_IDENTIFIER_ROW_ID) {
+					output.data[i].Reference(local.parquet_output.data[i]);
+				}
+			}
+		} else {
+			state.function.function(context, child, output);
+		}
 		if (state.metrics && !state.entry) {
 			state.metrics->Add(ReadPhase::EXECUTION, ReadMetric::OUTPUT_ROWS, output.size());
 		}
@@ -610,7 +671,14 @@ unique_ptr<FunctionData> BindOneLakeCachedScan(ClientContext &context, shared_pt
 		}
 	}
 	data->all_types = types;
+	data->count_column = CountColumn(data->schema_root.arrow_schema);
 	return std::move(data);
+}
+
+void CheckOneLakeScanBinding(ClientContext &context, const FunctionData &data) {
+	auto &source = data.Cast<BindData>().source;
+	source->Lifetime().CheckActive();
+	source->CheckIdentity(context);
 }
 
 void RegisterOneLakeCacheOptimizer(DatabaseInstance &db) {

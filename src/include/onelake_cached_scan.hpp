@@ -36,6 +36,7 @@ public:
 };
 
 TableFunction OneLakeCachedScanFunction();
+void CheckOneLakeScanBinding(ClientContext &context, const FunctionData &data);
 unique_ptr<FunctionData> BindOneLakeCachedScan(ClientContext &context, shared_ptr<OneLakeScanSource> source,
                                                bool cache_enabled, vector<string> &names, vector<LogicalType> &types);
 void RegisterOneLakeCacheOptimizer(DatabaseInstance &db);

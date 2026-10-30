@@ -1,6 +1,7 @@
 """Opt-in, read-only native-shell benchmark. Credentials stay in the environment."""
 
 import argparse
+import hashlib
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -46,6 +47,17 @@ def difference(after, before):
     return {key: value - before.get(key, 0) for key, value in after.items()}
 
 
+def comparable_result(case, rows):
+    if case == "value_sample":
+        row = rows[0]
+        if not (0 <= row["nonnull"] <= row["n"] <= 10):
+            raise ValueError("Invalid LIMIT sample counts")
+        # Unordered LIMIT can select different rows; values force the projection,
+        # but are not an equality oracle across independent reads.
+        return [{"n": row["n"]}]
+    return rows
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--approved-live-read", action="store_true", required=True)
@@ -59,9 +71,28 @@ def main():
     parser.add_argument("--read-metrics", action="store_true")
     parser.add_argument("--prepared", action="store_true")
     parser.add_argument("--profile", action="store_true")
-    parser.add_argument("--cases", nargs="+", choices=["sample", "count", "aggregate", "filter", "impossible"])
-    parser.add_argument("--modes", nargs="+", choices=["DIRECT_FILES", "TABLE_API"],
-                        default=["DIRECT_FILES", "TABLE_API"])
+    parser.add_argument(
+        "--cases",
+        nargs="+",
+        choices=[
+            "sample",
+            "value_sample",
+            "count",
+            "aggregate",
+            "filter",
+            "impossible",
+        ],
+    )
+    parser.add_argument(
+        "--binary-source",
+        help="Known source revision for an archived shell; otherwise current checkout",
+    )
+    parser.add_argument(
+        "--modes",
+        nargs="+",
+        choices=["DIRECT_FILES", "TABLE_API"],
+        default=["DIRECT_FILES", "TABLE_API"],
+    )
     parser.add_argument(
         "--external-file-cache", choices=["true", "false"], default="false"
     )
@@ -80,6 +111,11 @@ def main():
     column = identifier(args.column)
     queries = {
         "sample": f"SELECT count(*) AS n FROM (SELECT {column} FROM {table} LIMIT 10)",
+        "value_sample": (
+            f"SELECT count(*) AS n, count({column}) AS nonnull, "
+            f"min({column}) AS minimum, max({column}) AS maximum, sum({column}) AS total "
+            f"FROM (SELECT {column} FROM {table} LIMIT 10)"
+        ),
         "count": f"SELECT count(*) AS n FROM {table}",
         "aggregate": (
             f"SELECT count(*) AS n, count({column}) AS nonnull, "
@@ -101,9 +137,13 @@ def main():
         "source_commit": subprocess.check_output(
             ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
         ).strip(),
-        "source_dirty": bool(subprocess.check_output(
-            ["git", "-C", str(root), "status", "--porcelain"], text=True
-        ).strip()),
+        "source_dirty": bool(
+            subprocess.check_output(
+                ["git", "-C", str(root), "status", "--porcelain"], text=True
+            ).strip()
+        ),
+        "binary_source": args.binary_source,
+        "shell_sha256": hashlib.sha256(args.shell.read_bytes()).hexdigest(),
         "target": f"{args.workspace}/{args.item}/{args.schema}/{args.table}",
         "external_file_cache": args.external_file_cache == "true",
         "threads": 2,
@@ -118,7 +158,8 @@ def main():
             "process timings include setup and metrics/profile collection. "
             "No OS/service cache flush. Metrics are client-consumed response bytes, not wire bytes; "
             "direct-file HTTP outside DuckDB filesystem accounting is not measured. "
-            "Count-only samples may optimize away the named column and read the first authorized column. "
+            "Count-only samples may optimize away the named column and use an authorized count carrier. "
+            "value_sample forces a value projection; unordered sample values are not compared for equality. "
             "Independent sessions do not guarantee a common source snapshot."
         ),
         "experiments": [],
@@ -145,11 +186,20 @@ def main():
                 f"(TYPE ONELAKE, READ_MODE '{mode}', READ_ONLY);",
             ]
             if args.read_metrics:
-                commands += [".print BENCH_METRICS_SETUP", "SELECT * FROM onelake_read_metrics();"]
+                commands += [
+                    ".print BENCH_METRICS_SETUP",
+                    "SELECT * FROM onelake_read_metrics();",
+                ]
             if args.prepared:
-                commands += [".print BENCH_PREPARE", "PREPARE bench_query AS " + query + ";"]
+                commands += [
+                    ".print BENCH_PREPARE",
+                    "PREPARE bench_query AS " + query + ";",
+                ]
                 if args.read_metrics:
-                    commands += [".print BENCH_METRICS_PREPARE", "SELECT * FROM onelake_read_metrics();"]
+                    commands += [
+                        ".print BENCH_METRICS_PREPARE",
+                        "SELECT * FROM onelake_read_metrics();",
+                    ]
             profiles = []
             for index in range(args.repeats):
                 if args.profile:
@@ -159,14 +209,21 @@ def main():
                     if path.exists():
                         raise RuntimeError("Refusing to overwrite a profile")
                     profiles.append(path)
-                    commands += ["PRAGMA enable_profiling='json';",
-                                 "SET profiling_output='" + str(path).replace("'", "''") + "';"]
-                commands += [f".print BENCH_QUERY_{index}",
-                             "EXECUTE bench_query;" if args.prepared else query + ";"]
+                    commands += [
+                        "PRAGMA enable_profiling='json';",
+                        "SET profiling_output='" + str(path).replace("'", "''") + "';",
+                    ]
+                commands += [
+                    f".print BENCH_QUERY_{index}",
+                    "EXECUTE bench_query;" if args.prepared else query + ";",
+                ]
                 if args.profile:
                     commands += ["PRAGMA disable_profiling;"]
                 if args.read_metrics:
-                    commands += [f".print BENCH_METRICS_{index}", "SELECT * FROM onelake_read_metrics();"]
+                    commands += [
+                        f".print BENCH_METRICS_{index}",
+                        "SELECT * FROM onelake_read_metrics();",
+                    ]
             commands += [".print BENCH_DONE", ".quit"]
             print(f"{mode}: {case}", flush=True)
             started = time.perf_counter()
@@ -186,28 +243,41 @@ def main():
             runs = parse_runs(result.stdout)
             if len(runs) != args.repeats:
                 raise RuntimeError("Incomplete benchmark output")
-            setup_metrics = parse_metrics(result.stdout, "BENCH_METRICS_SETUP") if args.read_metrics else {}
+            setup_metrics = (
+                parse_metrics(result.stdout, "BENCH_METRICS_SETUP")
+                if args.read_metrics
+                else {}
+            )
             previous = setup_metrics
             prepare_seconds = None
             prepare_metrics = {}
             if args.prepared:
-                prepare_seconds = float(re.search(r"BENCH_PREPARE\r?\nRun Time \(s\): real ([0-9.]+)",
-                                                  result.stdout)[1])
+                prepare_seconds = float(
+                    re.search(
+                        r"BENCH_PREPARE\r?\nRun Time \(s\): real ([0-9.]+)",
+                        result.stdout,
+                    )[1]
+                )
                 if args.read_metrics:
                     previous = parse_metrics(result.stdout, "BENCH_METRICS_PREPARE")
                     prepare_metrics = difference(previous, setup_metrics)
             for run in runs:
-                reference = references.setdefault(case, run["result"])
-                if run["result"] != reference:
+                comparable = comparable_result(case, run["result"])
+                reference = references.setdefault(case, comparable)
+                if comparable != reference:
                     raise RuntimeError(
                         f"Result mismatch for {mode}/{case}; source may have changed"
                     )
                 if args.read_metrics:
-                    current = parse_metrics(result.stdout, f"BENCH_METRICS_{run['iteration']}")
+                    current = parse_metrics(
+                        result.stdout, f"BENCH_METRICS_{run['iteration']}"
+                    )
                     run["metrics"] = difference(current, previous)
                     previous = current
                 if args.profile:
-                    profile = json.loads(profiles[run["iteration"]].read_text(encoding="utf-8"))
+                    profile = json.loads(
+                        profiles[run["iteration"]].read_text(encoding="utf-8")
+                    )
                     run["profile"] = profile
                     profiles[run["iteration"]].unlink()
             report["experiments"].append(

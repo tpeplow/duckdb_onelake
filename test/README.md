@@ -93,17 +93,29 @@ The benchmark accepts `--read-metrics`, `--prepared`, `--profile`, `--cases` and
 `--modes`. For an approved target, add these to the earlier benchmark command:
 
 ```text
---read-metrics --prepared --profile --cases sample aggregate filter
+--read-metrics --prepared --profile --cases sample value_sample aggregate filter
 ```
 
 It records setup/PREPARE metrics separately, per-execution deltas and optional
 DuckDB profiles. EXECUTE is not necessarily binding-free: the current unversioned
-OneLake catalog causes DuckDB to rebind prepared statements. Schema lookup and
-scan binding can each allocate a schema read; inspect schema-phase counters
-rather than assuming one allocation. The count-only `sample` workload can also
-optimize away the named column; the Arrow reader then selects its first authorized
-column to obtain row counts. Use a value-dependent aggregate to measure a
-particular column's transfer.
+OneLake catalog causes DuckDB to rebind prepared statements. Catalog lookup hands
+its freshly validated schema bind to the immediately following scan bind once,
+within the same statement. A simple table reference therefore needs one schema
+allocation, plus a separate execution allocation; inspect schema-phase counters
+for more complex statements. No schema bind is reused across statements.
+
+The count-only `sample` workload can optimize away the named column. The Arrow
+reader chooses a narrow, plain primitive from the authorized schema as its count
+carrier, falling back to the first visible column when no supported primitive is
+available. NULL carrier values still contribute rows to COUNT(*). This heuristic
+does not guarantee minimum transfer size and does not avoid full-batch reads.
+Use `value_sample` to force the named column through a LIMIT aggregate, or
+`aggregate` for its full transfer. Unordered LIMIT samples compare row counts
+and check non-null-count bounds, not equality of selected values.
+
+Reports include the shell SHA-256 and checkout revision/dirty state. When using
+an archived shell, supply `--binary-source <revision>` to distinguish its source
+from the checkout containing the benchmark harness.
 
 Run the same workloads without `--read-metrics` to assess
 instrumentation overhead; keep profile settings equal. Mode order alternates

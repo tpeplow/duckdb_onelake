@@ -36,6 +36,10 @@ public:
 	string GetCachedResolvedPath() const;
 	void RememberResolvedPath(const string &path);
 
+protected:
+	virtual TableFunction BindTableRead(ClientContext &context, unique_ptr<FunctionData> &bind_data,
+	                                    vector<string> &names, vector<LogicalType> &types);
+
 private:
 	void UpdateColumnDefinitions(const vector<string> &names, const vector<LogicalType> &types);
 	void EnsureDetailsLoaded(ClientContext &context);
