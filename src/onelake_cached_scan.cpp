@@ -1,5 +1,6 @@
 #include "onelake_cached_scan.hpp"
 #include "onelake_cache_storage.hpp"
+#include "onelake_read_metrics.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/common/types/uuid.hpp"
@@ -108,6 +109,7 @@ struct GlobalState : GlobalTableFunctionState {
 	string key;
 	bool emitted = false;
 	unique_ptr<TableFilterSet> filters;
+	shared_ptr<OneLakeReadMetrics> metrics;
 	idx_t MaxThreads() const override {
 		return 1;
 	}
@@ -350,6 +352,7 @@ unique_ptr<GlobalTableFunctionState> Init(ClientContext &context, TableFunctionI
 	data.source->Lifetime().CheckActive();
 	data.source->CheckIdentity(context);
 	auto state = make_uniq<GlobalState>();
+	state->metrics = OneLakeReadMetrics::Get(context);
 	state->columns = input.column_ids;
 	try {
 		state->cache = context.registered_state->GetOrCreate<CacheState>("onelake_read_cache", context);
@@ -402,6 +405,7 @@ unique_ptr<LocalTableFunctionState> InitLocal(ExecutionContext &context, TableFu
                                               GlobalTableFunctionState *global) {
 	auto &state = global->Cast<GlobalState>();
 	auto local = make_uniq<LocalState>(context);
+	OneLakeReadTimer timer(state.entry ? nullptr : state.metrics, ReadPhase::EXECUTION, ReadMetric::ARROW_OPERATOR_NS);
 	TableFunctionInitInput child(state.child_bind, ChildColumns(state), {}, state.filters.get());
 	try {
 		OneLakeCacheReadScope scope(state.entry ? &state.entry->paths : nullptr);
@@ -413,6 +417,7 @@ unique_ptr<LocalTableFunctionState> InitLocal(ExecutionContext &context, TableFu
 		state.cache->Erase(state.key, state.entry);
 		StartArrow(context.client, input.bind_data->Cast<BindData>(), state, false);
 		TableFunctionInitInput fallback(state.child_bind, state.columns, {}, nullptr);
+		OneLakeReadTimer fallback_timer(state.metrics, ReadPhase::EXECUTION, ReadMetric::ARROW_OPERATOR_NS);
 		local->child = state.function.init_local(context, fallback, state.child.get());
 	}
 	return std::move(local);
@@ -421,10 +426,14 @@ unique_ptr<LocalTableFunctionState> InitLocal(ExecutionContext &context, TableFu
 void Scan(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
 	auto &state = input.global_state->Cast<GlobalState>();
 	auto &local = input.local_state->Cast<LocalState>();
+	OneLakeReadTimer timer(state.entry ? nullptr : state.metrics, ReadPhase::EXECUTION, ReadMetric::ARROW_OPERATOR_NS);
 	try {
 		OneLakeCacheReadScope scope(state.entry ? &state.entry->paths : nullptr);
 		TableFunctionInput child(state.child_bind, local.child.get(), state.child.get());
 		state.function.function(context, child, output);
+		if (state.metrics && !state.entry) {
+			state.metrics->Add(ReadPhase::EXECUTION, ReadMetric::OUTPUT_ROWS, output.size());
+		}
 		state.emitted |= output.size() != 0;
 	} catch (...) {
 		if (!state.entry) {
@@ -439,10 +448,14 @@ void Scan(ClientContext &context, TableFunctionInput &input, DataChunk &output) 
 		StartArrow(context, data, state, false);
 		ExecutionContext execution(context, local.thread, local.pipeline);
 		TableFunctionInitInput init(state.child_bind, state.columns, {}, nullptr);
+		OneLakeReadTimer fallback_timer(state.metrics, ReadPhase::EXECUTION, ReadMetric::ARROW_OPERATOR_NS);
 		local.child = state.function.init_local(execution, init, state.child.get());
 		output.Reset();
 		TableFunctionInput child(state.child_bind, local.child.get(), state.child.get());
 		state.function.function(context, child, output);
+		if (state.metrics) {
+			state.metrics->Add(ReadPhase::EXECUTION, ReadMetric::OUTPUT_ROWS, output.size());
+		}
 		state.emitted |= output.size() != 0;
 	}
 }

@@ -44,6 +44,7 @@ set(EXTENSION_SOURCES_COMMON
     src/onelake_api.cpp
     src/onelake_table_api.cpp
     src/onelake_table_reader.cpp
+    src/onelake_read_metrics.cpp
     src/onelake_cache_storage.cpp
     src/onelake_cache_directory.cpp
     src/onelake_cached_scan.cpp
@@ -189,6 +190,7 @@ add_custom_command(
   DEPENDS ${READER_CRATE_DIR}/Cargo.toml ${READER_CRATE_DIR}/Cargo.lock
           ${READER_CRATE_DIR}/build.rs ${READER_CRATE_DIR}/cbindgen.toml
           ${READER_CRATE_DIR}/src/lib.rs ${READER_CRATE_DIR}/src/ipc.rs ${READER_CRATE_DIR}/src/ffi.rs
+          ${READER_CRATE_DIR}/src/metrics.rs
   VERBATIM
 )
 add_custom_target(onelake_table_reader ALL DEPENDS ${READER_LIB} ${READER_HEADER})

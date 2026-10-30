@@ -1,5 +1,6 @@
 mod ffi;
 mod ipc;
+mod metrics;
 
 use std::collections::{HashSet, VecDeque};
 use std::io::Read;
@@ -19,6 +20,7 @@ use reqwest::Url;
 use serde::Deserialize;
 
 use ipc::FramedReader;
+use metrics::{elapsed, Metrics};
 
 const MAX_ALLOCATION_BYTES: u64 = 1024 * 1024;
 
@@ -151,6 +153,7 @@ trait Transport: Send {
 struct HttpTransport {
     client: Client,
     authorization: HeaderValue,
+    metrics: Metrics,
 }
 
 fn child_url(base: &Url, components: &[&str]) -> Url {
@@ -209,6 +212,7 @@ impl HttpTransport {
         Ok(Self {
             client,
             authorization,
+            metrics: Metrics::default(),
         })
     }
 }
@@ -237,10 +241,12 @@ impl Transport for HttpTransport {
             });
         }
         let mut bytes = Vec::new();
-        response
+        let result = response
             .take(MAX_ALLOCATION_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| ReadError::Transport)?;
+            .read_to_end(&mut bytes);
+        self.metrics
+            .update(|m| m.allocation_bytes += bytes.len() as u64);
+        result.map_err(|_| ReadError::Transport)?;
         if bytes.len() as u64 > MAX_ALLOCATION_BYTES {
             return Err(ReadError::Allocation);
         }
@@ -289,25 +295,96 @@ pub struct TableReader {
     projection: Option<Vec<usize>>,
     state: ReadState,
     finished: bool,
+    metrics: Metrics,
+    started: Option<Instant>,
+}
+
+struct MeasuredTransport {
+    inner: Box<dyn Transport>,
+    metrics: Metrics,
+}
+
+impl Transport for MeasuredTransport {
+    fn allocate(
+        &self,
+        url: &Url,
+        columns: Option<&[String]>,
+    ) -> Result<VecDeque<String>, ReadError> {
+        let start = self.metrics.start();
+        self.metrics.update(|m| m.allocation_requests += 1);
+        let result = self.inner.allocate(url, columns);
+        let ns = elapsed(start);
+        self.metrics.update(|m| m.allocation_ns += ns);
+        result
+    }
+
+    fn stream(&self, url: Url) -> Result<Box<dyn Read + Send>, ReadError> {
+        let start = self.metrics.start();
+        self.metrics.update(|m| m.stream_requests += 1);
+        let result = self.inner.stream(url);
+        let ns = elapsed(start);
+        self.metrics.update(|m| m.stream_open_ns += ns);
+        result.map(|body| self.metrics.body(body))
+    }
+}
+
+fn decode_stream(
+    body: Box<dyn Read + Send>,
+    state: ReadState,
+    metrics: &Metrics,
+) -> Result<StreamReader<FramedReader>, ReadError> {
+    let before = metrics.snapshot();
+    let start = metrics.start();
+    let result = StreamReader::try_new_unbuffered(FramedReader::new(body, state), None)
+        .map_err(|_| ReadError::Arrow);
+    let ns =
+        elapsed(start).saturating_sub(metrics.snapshot().stream_read_ns - before.stream_read_ns);
+    metrics.update(|m| m.ipc_processing_ns += ns);
+    result
 }
 
 impl TableReader {
     /// `token` must represent the caller and use audience `https://storage.azure.com`.
     /// Token acquisition/refresh remains the responsibility of the extension's secret provider.
     pub fn open(request: ReadRequest, token: &str) -> Result<Self, ReadError> {
-        let table_url = request.table_url()?;
-        Self::open_transport(
-            table_url,
-            request.columns,
-            Box::new(HttpTransport::new(token)?),
-        )
+        Self::open_profiled(request, token, Metrics::default())
     }
 
+    fn open_profiled(
+        request: ReadRequest,
+        token: &str,
+        metrics: Metrics,
+    ) -> Result<Self, ReadError> {
+        let table_url = request.table_url()?;
+        let mut transport = HttpTransport::new(token)?;
+        transport.metrics = metrics.clone();
+        Self::open_transport_profiled(table_url, request.columns, Box::new(transport), metrics)
+    }
+
+    #[cfg(test)]
     fn open_transport(
         table_url: Url,
         columns: Option<Vec<String>>,
         transport: Box<dyn Transport>,
     ) -> Result<Self, ReadError> {
+        Self::open_transport_profiled(table_url, columns, transport, Metrics::default())
+    }
+
+    fn open_transport_profiled(
+        table_url: Url,
+        columns: Option<Vec<String>>,
+        transport: Box<dyn Transport>,
+        metrics: Metrics,
+    ) -> Result<Self, ReadError> {
+        let started = metrics.start();
+        let transport: Box<dyn Transport> = if started.is_some() {
+            Box::new(MeasuredTransport {
+                inner: transport,
+                metrics: metrics.clone(),
+            })
+        } else {
+            transport
+        };
         let state = ReadState {
             cancellation: Cancellation(Arc::new(AtomicBool::new(false))),
             deadline: Instant::now() + Duration::from_secs(60 * 60),
@@ -316,9 +393,7 @@ impl TableReader {
         let first = streams.pop_front().ok_or(ReadError::Allocation)?;
         state.check()?;
         let body = transport.stream(child_url(&table_url, &["readStream", &first]))?;
-        let current =
-            StreamReader::try_new_unbuffered(FramedReader::new(body, state.clone()), None)
-                .map_err(|_| ReadError::Arrow)?;
+        let current = decode_stream(body, state.clone(), &metrics)?;
         let source_schema = current.schema();
         let projection = match columns {
             Some(columns) => {
@@ -354,6 +429,8 @@ impl TableReader {
             projection,
             state,
             finished: false,
+            metrics,
+            started,
         })
     }
 
@@ -387,6 +464,7 @@ impl TableReader {
             let body = self
                 .transport
                 .stream(child_url(&self.table_url, &["readStream", &stream]))?;
+            // This schema decode is included in the enclosing next() processing timer.
             let reader =
                 StreamReader::try_new_unbuffered(FramedReader::new(body, self.state.clone()), None)
                     .map_err(|_| ReadError::Arrow)?;
@@ -406,17 +484,40 @@ impl Iterator for TableReader {
             return None;
         }
         // Arrow's C stream callbacks call this iterator; Rust panics must not cross that ABI.
+        let before = self.metrics.snapshot();
+        let start = self.metrics.start();
         let result = catch_unwind(AssertUnwindSafe(|| self.next_batch()))
             .unwrap_or(Err(ReadError::Internal));
+        let after = self.metrics.snapshot();
+        let ns = elapsed(start)
+            .saturating_sub(after.stream_read_ns - before.stream_read_ns)
+            .saturating_sub(after.stream_open_ns - before.stream_open_ns);
+        self.metrics.update(|m| m.ipc_processing_ns += ns);
         match result {
-            Ok(Some(batch)) => Some(Ok(batch)),
+            Ok(Some(batch)) => {
+                self.metrics.update(|m| {
+                    if m.batches == 0 {
+                        m.first_batches = 1;
+                        m.first_batch_ns = elapsed(self.started);
+                    }
+                    m.batches += 1;
+                    m.rows += batch.num_rows() as u64;
+                });
+                Some(Ok(batch))
+            }
             result => {
                 self.finished = true;
                 self.current = None;
                 self.streams.clear();
                 match result {
-                    Err(error) => Some(Err(ArrowError::ExternalError(Box::new(error)))),
-                    _ => None,
+                    Err(error) => {
+                        self.metrics.update(|m| m.errors += 1);
+                        Some(Err(ArrowError::ExternalError(Box::new(error))))
+                    }
+                    _ => {
+                        self.metrics.update(|m| m.completions += 1);
+                        None
+                    }
                 }
             }
         }

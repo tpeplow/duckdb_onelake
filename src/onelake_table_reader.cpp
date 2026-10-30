@@ -2,6 +2,7 @@
 #include "onelake_table_reader_c_api.hpp"
 #include "onelake_table_api.hpp"
 #include "onelake_cached_scan.hpp"
+#include "onelake_read_metrics.hpp"
 #include "storage/onelake_catalog.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/function/table/arrow.hpp"
@@ -25,7 +26,12 @@ class TableReadStream : public ArrowArrayStreamWrapper {
 public:
 	TableReadStream(ClientContext &context_p, OneLakeCredentials &credentials, const TableReadTarget &target,
 	                const vector<string> &columns)
-	    : context(context_p), reader(nullptr, ol_table_reader_close) {
+	    : context(context_p), reader(nullptr, ol_table_reader_close), metrics(OneLakeReadMetrics::Get(context)),
+	      phase(columns.empty() ? ReadPhase::SCHEMA : ReadPhase::EXECUTION) {
+		OneLakeReadTimer timer(metrics, phase, ReadMetric::READER_OPEN_NS);
+		if (metrics) {
+			metrics->Add(phase, ReadMetric::READER_OPENS, 1);
+		}
 		Json::Value request;
 		request["baseUrl"] = target.origin;
 		request["workspaceId"] = target.workspace;
@@ -43,7 +49,11 @@ public:
 		auto json = Json::writeString(Json::StreamWriterBuilder(), request);
 		char error[512] = {};
 		OlTableReader *handle = nullptr;
-		if (ol_table_reader_open(json.c_str(), token.c_str(), &handle, error, sizeof(error)) != 0) {
+		OlReadMetrics initial {};
+		auto status = ol_table_reader_open_profiled(json.c_str(), token.c_str(), &handle, metrics ? &initial : nullptr,
+		                                            error, sizeof(error));
+		Publish(initial);
+		if (status != 0) {
 			throw IOException("%s", error);
 		}
 		reader.reset(handle);
@@ -53,16 +63,57 @@ public:
 	}
 
 	shared_ptr<ArrowArrayWrapper> GetNextChunk() override {
+		OneLakeReadTimer timer(metrics, phase, ReadMetric::ARROW_FETCH_NS);
 		if (context.interrupted) {
 			ol_table_reader_cancel(reader.get());
 			throw InterruptException();
 		}
-		return ArrowArrayStreamWrapper::GetNextChunk();
+		try {
+			auto result = ArrowArrayStreamWrapper::GetNextChunk();
+			Update();
+			return result;
+		} catch (...) {
+			Update();
+			throw;
+		}
 	}
 
 private:
+	void Update() {
+		if (metrics) {
+			OlReadMetrics current {};
+			if (ol_table_reader_metrics(reader.get(), &current) == 0) {
+				Publish(current);
+			}
+		}
+	}
+	void Publish(const OlReadMetrics &current) {
+		if (!metrics) {
+			return;
+		}
+#define PUBLISH(field, metric) metrics->Add(phase, ReadMetric::metric, current.field - previous.field)
+		PUBLISH(allocation_requests, ALLOCATION_REQUESTS);
+		PUBLISH(allocation_bytes, ALLOCATION_BYTES);
+		PUBLISH(allocation_ns, ALLOCATION_NS);
+		PUBLISH(stream_requests, STREAM_REQUESTS);
+		PUBLISH(stream_open_ns, STREAM_OPEN_NS);
+		PUBLISH(stream_bytes, STREAM_BYTES);
+		PUBLISH(stream_read_ns, STREAM_READ_NS);
+		PUBLISH(ipc_processing_ns, IPC_PROCESSING_NS);
+		PUBLISH(batches, BATCHES);
+		PUBLISH(rows, ROWS);
+		PUBLISH(first_batches, FIRST_BATCHES);
+		PUBLISH(first_batch_ns, FIRST_BATCH_NS);
+		PUBLISH(completions, COMPLETIONS);
+		PUBLISH(errors, ERRORS);
+#undef PUBLISH
+		previous = current;
+	}
 	ClientContext &context;
 	std::unique_ptr<OlTableReader, decltype(&ol_table_reader_close)> reader;
+	shared_ptr<OneLakeReadMetrics> metrics;
+	ReadPhase phase;
+	OlReadMetrics previous {};
 };
 
 class LiveReadSource : public OneLakeScanSource {
@@ -104,6 +155,7 @@ private:
 TableFunction BindOneLakeTableRead(ClientContext &context, OneLakeCatalog &catalog, const OneLakeLakehouse &item,
                                    const string &schema, const string &table, unique_ptr<FunctionData> &bind_data,
                                    vector<string> &names, vector<LogicalType> &types) {
+	OneLakeReadTimer timer(OneLakeReadMetrics::Get(context), ReadPhase::SCHEMA, ReadMetric::BIND_NS);
 	TableReadTarget target {item.table_api_origin, catalog.GetWorkspaceId(), item.id, schema, table};
 	bind_data = BindOneLakeCachedScan(context, make_shared_ptr<LiveReadSource>(catalog, std::move(target)),
 	                                  catalog.UsesReadCache(), names, types);

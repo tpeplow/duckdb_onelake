@@ -4,16 +4,19 @@ use std::ptr;
 
 use arrow_array::ffi_stream::FFI_ArrowArrayStream;
 
+use crate::metrics::{Metrics, OlReadMetrics};
 use crate::{Cancellation, ReadError, ReadRequest, TableReader};
 
 pub struct OlTableReader {
     reader: Option<TableReader>,
     cancellation: Cancellation,
+    metrics: Metrics,
 }
 
 fn handle(reader: TableReader) -> *mut OlTableReader {
     Box::into_raw(Box::new(OlTableReader {
         cancellation: reader.cancellation(),
+        metrics: reader.metrics.clone(),
         reader: Some(reader),
     }))
 }
@@ -60,10 +63,38 @@ pub unsafe extern "C" fn ol_table_reader_open(
     error_buffer: *mut c_char,
     error_buffer_len: usize,
 ) -> i32 {
+    ol_table_reader_open_profiled(
+        request_json,
+        token,
+        output,
+        ptr::null_mut(),
+        error_buffer,
+        error_buffer_len,
+    )
+}
+
+/// Opens a reader with optional numeric metrics. On failure, writes the partial snapshot too.
+///
+/// # Safety
+/// Same requirements as ol_table_reader_open. `metrics` must be null (disabled) or writable.
+#[no_mangle]
+pub unsafe extern "C" fn ol_table_reader_open_profiled(
+    request_json: *const c_char,
+    token: *const c_char,
+    output: *mut *mut OlTableReader,
+    metrics: *mut OlReadMetrics,
+    error_buffer: *mut c_char,
+    error_buffer_len: usize,
+) -> i32 {
+    let counters = if metrics.is_null() {
+        Metrics::default()
+    } else {
+        Metrics::enabled()
+    };
     if !output.is_null() {
         *output = ptr::null_mut();
     }
-    report(error_buffer, error_buffer_len, || {
+    let status = report(error_buffer, error_buffer_len, || {
         if request_json.is_null() || token.is_null() || output.is_null() {
             return Err(ReadError::InvalidRequest("null FFI argument"));
         }
@@ -72,11 +103,37 @@ pub unsafe extern "C" fn ol_table_reader_open(
         let token = CStr::from_ptr(token)
             .to_str()
             .map_err(|_| ReadError::InvalidRequest("token must be UTF-8"))?;
-        *output = handle(TableReader::open(request, token)?);
+        *output = handle(TableReader::open_profiled(
+            request,
+            token,
+            counters.clone(),
+        )?);
         Ok(())
-    })
+    });
+    if status != 0 {
+        counters.update(|m| m.errors += 1);
+    }
+    if !metrics.is_null() {
+        *metrics = counters.snapshot();
+    }
+    status
 }
 
+/// Gets cumulative metrics, including after Arrow export.
+///
+/// # Safety
+/// `reader` must be live and not concurrently closed; `output` must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn ol_table_reader_metrics(
+    reader: *const OlTableReader,
+    output: *mut OlReadMetrics,
+) -> i32 {
+    if reader.is_null() || output.is_null() {
+        return 1;
+    }
+    *output = (*reader).metrics.snapshot();
+    0
+}
 /// Transfers the reader into an Arrow C stream exactly once.
 ///
 /// # Safety

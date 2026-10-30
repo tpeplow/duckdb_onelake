@@ -119,6 +119,207 @@ fn reader(streams: Vec<Vec<u8>>) -> (TableReader, Arc<Mutex<Vec<String>>>) {
     )
 }
 
+fn measured_reader(streams: Vec<Vec<u8>>, metrics: Metrics) -> TableReader {
+    let transport = MockTransport {
+        bodies: Mutex::new(
+            streams
+                .into_iter()
+                .map(|bytes| Box::new(Cursor::new(bytes)) as Box<dyn Read + Send>)
+                .collect(),
+        ),
+        calls: Arc::new(Mutex::new(Vec::new())),
+    };
+    TableReader::open_transport_profiled(
+        request().table_url().unwrap(),
+        Some(vec!["Price".into()]),
+        Box::new(transport),
+        metrics,
+    )
+    .unwrap()
+}
+
+#[test]
+fn metrics_count_consumed_bytes_and_survive_ffi_export() {
+    let bodies = vec![
+        encoded("Price", &[Some(10.0), None]),
+        encoded("Price", &[]),
+        encoded("Price", &[Some(20.0)]),
+    ];
+    let bytes = bodies.iter().map(|b| b.len() as u64).sum::<u64>();
+    let metrics = Metrics::enabled();
+    let reader = measured_reader(bodies, metrics.clone());
+    let initial = metrics.snapshot();
+    assert_eq!(initial.allocation_requests, 1);
+    assert_eq!(initial.stream_requests, 1);
+    assert_eq!(initial.rows, 0);
+    assert!(initial.stream_bytes > 0 && initial.stream_bytes < bytes);
+    let handle = ffi::test_handle(reader);
+    let mut stream = MaybeUninit::uninit();
+    unsafe {
+        assert_eq!(
+            ffi::ol_table_reader_export(handle, stream.as_mut_ptr(), std::ptr::null_mut(), 0),
+            0
+        );
+        let mut stream = stream.assume_init();
+        let mut imported = ArrowArrayStreamReader::from_raw(&mut stream).unwrap();
+        let rows: usize = imported.by_ref().map(|b| b.unwrap().num_rows()).sum();
+        assert_eq!(rows, 3);
+        let mut snapshot = metrics::OlReadMetrics::default();
+        assert_eq!(ffi::ol_table_reader_metrics(handle, &mut snapshot), 0);
+        assert_eq!(snapshot.stream_bytes, bytes);
+        assert_eq!(snapshot.stream_requests, 3);
+        assert_eq!(snapshot.batches, 2);
+        assert_eq!(snapshot.rows, 3);
+        assert_eq!(snapshot.first_batches, 1);
+        assert_eq!(snapshot.completions, 1);
+        assert_eq!(snapshot.errors, 0);
+        drop(imported);
+        ffi::ol_table_reader_close(handle);
+    }
+}
+
+#[test]
+fn metrics_preserve_partial_cancelled_and_disabled_reads() {
+    let body = encoded("Price", &[Some(10.0)]);
+    let metrics = Metrics::enabled();
+    let mut reader = measured_reader(vec![body.clone(), body.clone()], metrics.clone());
+    reader.next().unwrap().unwrap();
+    assert_eq!(metrics.snapshot().stream_requests, 1);
+    assert_eq!(metrics.snapshot().completions, 0);
+    reader.cancellation().cancel();
+    assert!(reader.next().unwrap().is_err());
+    assert!(reader.next().is_none());
+    assert_eq!(metrics.snapshot().errors, 1);
+    assert_eq!(metrics.snapshot().stream_requests, 1);
+    assert_eq!(metrics.snapshot().completions, 0);
+    let off = Metrics::default();
+    assert_eq!(
+        measured_reader(vec![body], off.clone())
+            .next()
+            .unwrap()
+            .unwrap()
+            .num_rows(),
+        1
+    );
+    assert_eq!(off.snapshot().stream_bytes, 0);
+    assert_eq!(off.snapshot().allocation_requests, 0);
+    assert!(off.start().is_none());
+    let mut truncated = encoded("Price", &[Some(10.0)]);
+    truncated.truncate(truncated.len() - 12);
+    let broken = Metrics::enabled();
+    let mut reader = measured_reader(
+        vec![truncated, encoded("Price", &[Some(20.0)])],
+        broken.clone(),
+    );
+    assert!(reader.next().unwrap().is_err());
+    assert!(reader.next().is_none());
+    assert_eq!(broken.snapshot().errors, 1);
+    assert_eq!(broken.snapshot().completions, 0);
+    assert_eq!(broken.snapshot().stream_requests, 1);
+}
+
+#[test]
+fn profiled_ffi_failure_returns_partial_counters_without_a_handle() {
+    let json = CString::new("{").unwrap();
+    let token = CString::new("test-token").unwrap();
+    let mut reader = std::ptr::null_mut();
+    let mut counters = metrics::OlReadMetrics::default();
+    let mut error = [0 as c_char; 128];
+    unsafe {
+        assert_eq!(
+            ffi::ol_table_reader_open_profiled(
+                json.as_ptr(),
+                token.as_ptr(),
+                &mut reader,
+                &mut counters,
+                error.as_mut_ptr(),
+                error.len()
+            ),
+            1
+        );
+    }
+    assert!(reader.is_null());
+    assert_eq!(counters.errors, 1);
+    assert_eq!(counters.allocation_requests, 0);
+}
+
+#[test]
+fn metrics_measure_http_allocation_bytes_and_failed_requests() {
+    let metrics = Metrics::enabled();
+    let mut http = HttpTransport::new("test-token").unwrap();
+    http.metrics = metrics.clone();
+    let transport = MeasuredTransport {
+        inner: Box::new(http),
+        metrics: metrics.clone(),
+    };
+    let body = r#"{"streams":[{"streamId":"opaque"}]}"#;
+    let (url, server) = serve_once("200 OK", body);
+    transport.allocate(&url, Some(&["Price".into()])).unwrap();
+    server.join().unwrap();
+    assert_eq!(metrics.snapshot().allocation_bytes, body.len() as u64);
+    let (url, server) = serve_once("403 Forbidden", "sensitive-service-error");
+    assert!(matches!(
+        transport.allocate(&url, None),
+        Err(ReadError::Http { status: 403, .. })
+    ));
+    server.join().unwrap();
+    assert_eq!(metrics.snapshot().allocation_requests, 2);
+    assert_eq!(metrics.snapshot().allocation_bytes, body.len() as u64);
+    let body = encoded("Price", &[Some(2.0)]);
+    let (url, server) = serve_response("200 OK", "application/vnd.apache.arrow.stream", &body);
+    let mut bytes = Vec::new();
+    transport
+        .stream(url)
+        .unwrap()
+        .read_to_end(&mut bytes)
+        .unwrap();
+    server.join().unwrap();
+    assert_eq!(metrics.snapshot().stream_bytes, body.len() as u64);
+    assert_eq!(bytes, body);
+}
+
+#[test]
+#[ignore = "controlled local instrumentation-overhead benchmark"]
+fn metrics_overhead() {
+    let body = encoded("Price", &vec![Some(10.0); 8192]);
+    for enabled in [false, true] {
+        for _ in 0..1000 {
+            let metrics = if enabled {
+                Metrics::enabled()
+            } else {
+                Metrics::default()
+            };
+            measured_reader(vec![body.clone(); 2], metrics).for_each(|batch| {
+                batch.unwrap();
+            });
+        }
+    }
+    for round in 0..7 {
+        for enabled in if round % 2 == 0 {
+            [false, true]
+        } else {
+            [true, false]
+        } {
+            let start = Instant::now();
+            for _ in 0..1000 {
+                let metrics = if enabled {
+                    Metrics::enabled()
+                } else {
+                    Metrics::default()
+                };
+                let rows: usize = measured_reader(vec![body.clone(); 2], metrics)
+                    .map(|batch| batch.unwrap().num_rows())
+                    .sum();
+                assert_eq!(rows, 16384);
+            }
+            println!(
+                "METRICS_OVERHEAD round={round} enabled={enabled} elapsed_ns={}",
+                start.elapsed().as_nanos()
+            );
+        }
+    }
+}
+
 #[test]
 fn consumes_independent_streams_once_including_empty_streams() {
     let (mut reader, calls) = reader(vec![

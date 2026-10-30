@@ -36,6 +36,91 @@ is only impossible when the selected data's maximum is at most one billion.
 Wall time includes SQL binding/execution; no Rust wire-byte or per-query memory
 measurement is implied. Keep generated reports outside the repository.
 
+## Read metrics (experimental)
+
+Enable numeric, connection-local diagnostics before binding a TABLE_API query:
+
+```sql
+SET onelake_enable_read_metrics = true;
+ATTACH '<workspace-guid>/<item-guid>' AS lake
+    (TYPE ONELAKE, READ_MODE 'TABLE_API', READ_ONLY);
+PREPARE sample AS SELECT Price FROM lake.dbo.example LIMIT 10;
+SELECT * FROM onelake_read_metrics() WHERE value > 0;
+EXECUTE sample;
+SELECT * FROM onelake_read_metrics() WHERE value > 0;
+SET onelake_enable_read_metrics = false;
+```
+
+Use the authentication setup in the README and substitute your schema, table and
+column. The setting defaults to false. Counters accumulate until the connection
+closes; subtract snapshots to measure a statement. Disabling collection preserves
+existing counters. Metrics queries do not reset them or contact OneLake. No query
+text, identities, tokens, URLs, stream IDs, headers or rows are included.
+
+The function returns `phase`, `metric`, and an unsigned integer `value`. Phases are
+`shared` (Table API token/metadata work), `schema` (schema-only reads), and
+`execution` (projected reads and the native Arrow operator). All durations ending
+in `_ns` are wall-clock nanoseconds, **not CPU time**.
+
+| Metrics | Meaning |
+| --- | --- |
+| `token_calls`, `token_ns` | Token-provider and identity-validation calls, including cache hits; not token-service HTTP request counts. |
+| `metadata_requests`, `metadata_bytes`, `metadata_ns` | Table API discovery/catalog HTTP attempts, response bytes retained by the bounded receiver, and request/parse time. |
+| `bind_ns`, `reader_opens`, `reader_open_ns` | Arrow binding adapter time and native stream-construction attempts/time. Binding does not include all earlier catalog discovery. |
+| `allocation_requests`, `allocation_bytes`, `allocation_ns` | Rust POST attempts, consumed allocation-response bytes, and allocation/parse time. Attempts are not a billing ledger. |
+| `stream_requests`, `stream_open_ns` | Rust GET attempts and time until response headers are available. |
+| `stream_bytes`, `stream_read_ns` | Bytes returned by successful response-body reads and time spent in those reads. Includes IPC metadata/dictionaries, not just values. |
+| `ipc_processing_ns` | Framing, validation, decoding and batch projection time after subtracting observed body-read and stream-open time. Includes allocation/copies/scheduling and instrumentation overhead. |
+| `batches`, `rows` | Arrow batches/rows delivered by Rust, including surplus rows received for LIMIT. |
+| `first_batches`, `first_batch_ns` | Number of readers reaching a first batch and sum of allocation-start-to-first-batch spans. Includes intervening consumer delay; divide by first_batches for a mean. |
+| `completions`, `errors` | Readers reaching EOF and Rust open/iteration errors. Early LIMIT termination is not completion; native token/binding errors are not Rust errors. |
+| `arrow_fetch_ns`, `arrow_operator_ns`, `output_rows` | Native C-stream fetch time, inclusive Arrow local-init/scan time, and rows emitted by that operator before residual SQL filtering. Parquet cache hits are not counted as Arrow output. |
+
+Times overlap: reader-open includes allocation/initial-stream work; binding
+includes schema reader-open; first-batch spans include several stages.
+`arrow_operator_ns - arrow_fetch_ns` estimates remaining native conversion/scan
+overhead, not isolated conversion CPU. Do not sum all durations. Server execution,
+DNS/TLS, network buffering and scheduling are not independently observable.
+Body bytes are client-consumed bytes, **not wire traffic**: TLS/HTTP overhead,
+prefetch and bytes abandoned after LIMIT are excluded.
+
+These counters instrument the TABLE_API path, not DIRECT_FILES' catalog or Delta
+kernel HTTP. Zero counters in direct-file mode do not mean zero traffic.
+Use DuckDB JSON profiles for native file bytes, Parquet operators, filters and
+local SQL; those counters also do not include every HTTP client.
+
+The benchmark accepts `--read-metrics`, `--prepared`, `--profile`, `--cases` and
+`--modes`. For an approved target, add these to the earlier benchmark command:
+
+```text
+--read-metrics --prepared --profile --cases sample aggregate filter
+```
+
+It records setup/PREPARE metrics separately, per-execution deltas and optional
+DuckDB profiles. EXECUTE is not necessarily binding-free: the current unversioned
+OneLake catalog causes DuckDB to rebind prepared statements. Schema lookup and
+scan binding can each allocate a schema read; inspect schema-phase counters
+rather than assuming one allocation. The count-only `sample` workload can also
+optimize away the named column; the Arrow reader then selects its first authorized
+column to obtain row counts. Use a value-dependent aggregate to measure a
+particular column's transfer.
+
+Run the same workloads without `--read-metrics` to assess
+instrumentation overhead; keep profile settings equal. Mode order alternates
+between workloads. Network/service variability can outweigh instrumentation cost.
+No automatic full-table benchmark is run by loading the extension.
+
+For a controlled Rust-only overhead comparison without network traffic:
+
+```sh
+cargo test --release --locked --manifest-path rust/onelake_table_reader/Cargo.toml metrics_overhead -- --ignored --nocapture
+python -m unittest discover -s test -p test_benchmark_reads.py
+```
+
+The local benchmark warms up, then alternates enabled/disabled order over seven
+rounds of 1,000 two-batch reads. It measures Rust framing/decoding overhead only,
+not the C++ counters or live transport.
+
 ## Guarded Arrow-to-Parquet cache (experimental)
 
 `READ_CACHE 'OFF'` is the default. Request the experimental path with:

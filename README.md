@@ -83,8 +83,9 @@ currently still reads fresh Arrow streams. See the [cache instructions](test/REA
 Schema binding allocates a read session with the column option omitted, reads its
 Arrow schema, and closes it without consuming rows. Execution allocates a fresh
 session with the required columns. Binding therefore incurs additional billed
-`POST /read` operations, including for metadata-only queries; prepared statements
-retain their bound schema, not a read session. A changed projected schema fails
+`POST /read` operations, including for metadata-only queries. Prepared statements
+do not retain a read session; the current unversioned catalog also makes DuckDB
+rebind on EXECUTE, including schema probes. A changed projected schema fails
 execution rather than silently converting against stale metadata.
 
 Projection is pushed to OneLake; filters, joins, aggregates and LIMIT execute in
@@ -103,6 +104,11 @@ changes; TABLE_API does not automatically discard entries used by prepared queri
 
 See [reader test instructions and limits](test/README.md). Live RLS/CLS policy
 matrices, native Iceberg fixtures and non-Windows builds remain release gates.
+
+For opt-in transfer, decoding and native scan timings, enable
+`SET onelake_enable_read_metrics=true` and query `onelake_read_metrics()`.
+See [read metrics and benchmark instructions](test/README.md#read-metrics-experimental)
+for phase definitions, overlapping timings and measurement limits.
 
 ## Features
 - Authentication using:

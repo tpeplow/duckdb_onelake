@@ -4,6 +4,11 @@
 
 require onelake
 
+query I
+SELECT current_setting('onelake_enable_read_metrics');
+----
+false
+
 statement error
 ATTACH '00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002' AS invalid_cache (TYPE ONELAKE, READ_CACHE 'AUTO');
 ----
@@ -51,11 +56,43 @@ ATTACH '00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-00000000000
 statement ok
 SET VARIABLE AZURE_STORAGE_TOKEN = 'not-a-token';
 
+statement ok
+SET onelake_enable_read_metrics=true;
+
 # The explicit env provider must neither switch to CLI nor fall back to file discovery.
 statement error
 SELECT * FROM secured_explicit.dbo.unavailable;
 ----
 A caller Entra token is required
+
+query I
+SELECT value > 0 FROM onelake_read_metrics() WHERE phase='shared' AND metric='token_calls';
+----
+true
+
+query I
+SELECT sum(value) FROM onelake_read_metrics() WHERE metric IN ('metadata_requests', 'allocation_requests', 'stream_requests');
+----
+0
+
+statement ok
+CREATE TEMP TABLE metrics_before AS SELECT * FROM onelake_read_metrics();
+
+statement ok
+SET onelake_enable_read_metrics=false;
+
+statement error
+SELECT * FROM secured_explicit.dbo.unavailable;
+----
+A caller Entra token is required
+
+query I
+SELECT count(*) FROM metrics_before b JOIN onelake_read_metrics() m USING (phase, metric) WHERE b.value <> m.value;
+----
+0
+
+statement ok
+DROP TABLE metrics_before;
 
 statement ok
 RESET VARIABLE AZURE_STORAGE_TOKEN;

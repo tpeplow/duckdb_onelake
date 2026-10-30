@@ -245,11 +245,22 @@ void TestCatalogRetirement() {
 	function.function_info = make_shared_ptr<Info>(make_shared_ptr<Source>(fixture));
 	ExtensionLoader loader(*db.instance, "detach_tests");
 	loader.RegisterFunction(std::move(function));
+	Query(connection, "SET onelake_enable_read_metrics=true");
 	Query(connection, "PREPARE detached_scan AS SELECT sum(Price)::BIGINT FROM detach_fixture()");
 	Check(Scalar(connection, "EXECUTE detached_scan") == 33550336, "Attached synthetic source failed");
+	const string output_rows =
+	    "SELECT value FROM onelake_read_metrics() WHERE phase='execution' AND metric='output_rows'";
+	Check(Scalar(connection, output_rows) == 8192, "Arrow output metrics did not count native scan rows");
+	Check(Scalar(connection, "SELECT value > 0 FROM onelake_read_metrics() "
+	                         "WHERE phase='execution' AND metric='arrow_operator_ns'") == 1,
+	      "Arrow operator timing was not recorded");
+	Connection isolated(db);
+	Check(Scalar(isolated, "SELECT sum(value)::BIGINT FROM onelake_read_metrics()") == 0,
+	      "Read metrics crossed connection boundaries");
 	auto opens = fixture->opens;
 	Check(Scalar(connection, "EXECUTE detached_scan") == 33550336 && fixture->opens == opens,
 	      "Attached synthetic cache did not hit");
+	Check(Scalar(connection, output_rows) == 8192, "Parquet cache hit was incorrectly counted as Arrow output");
 	Query(connection, "DETACH retirement");
 	Check(connection.Query("EXECUTE detached_scan")->HasError() && fixture->opens == opens,
 	      "SQL DETACH left an old prepared cache usable while catalog was retained");

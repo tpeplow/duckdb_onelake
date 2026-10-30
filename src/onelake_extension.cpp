@@ -3,6 +3,7 @@
 #include "onelake_secret.hpp"
 #include "onelake_cache_storage.hpp"
 #include "onelake_cached_scan.hpp"
+#include "onelake_read_metrics.hpp"
 #ifdef DUCKDB_BUILD_LOADABLE_EXTENSION
 #include "onelake_parser_extension.hpp"
 #endif
@@ -15,6 +16,7 @@ namespace duckdb {
 
 static void LoadInternal(ExtensionLoader &loader) {
 	RegisterOneLakeSecret(loader);
+	RegisterOneLakeReadMetrics(loader);
 	RegisterOneLakeCacheStorage(loader.GetDatabaseInstance());
 	RegisterOneLakeCacheOptimizer(loader.GetDatabaseInstance());
 

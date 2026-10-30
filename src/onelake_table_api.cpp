@@ -1,4 +1,5 @@
 #include "onelake_table_api.hpp"
+#include "onelake_read_metrics.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include <curl/curl.h>
@@ -59,7 +60,9 @@ size_t Receive(void *buffer, size_t size, size_t count, void *target) {
 	return size * count;
 }
 
-Json::Value Get(const string &url, const string &token) {
+Json::Value Get(ClientContext &context, const string &url, const string &token) {
+	auto metrics = OneLakeReadMetrics::Get(context);
+	OneLakeReadTimer timer(metrics, ReadPhase::SHARED, ReadMetric::METADATA_NS);
 	std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl(curl_easy_init(), curl_easy_cleanup);
 	if (!curl) {
 		throw IOException("Cannot initialize OneLake metadata request");
@@ -77,7 +80,13 @@ Json::Value Get(const string &url, const string &token) {
 	curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT, 60L);
 	curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, Receive);
 	curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &body);
+	if (metrics) {
+		metrics->Add(ReadPhase::SHARED, ReadMetric::METADATA_REQUESTS, 1);
+	}
 	auto status = curl_easy_perform(curl.get());
+	if (metrics) {
+		metrics->Add(ReadPhase::SHARED, ReadMetric::METADATA_BYTES, body.size());
+	}
 	long http_status = 0;
 	curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &http_status);
 	if (status != CURLE_OK || http_status != 200) {
@@ -86,7 +95,8 @@ Json::Value Get(const string &url, const string &token) {
 	return Parse(body);
 }
 
-vector<Json::Value> Pages(const string &url, const string &token, const string &field, bool fabric = false) {
+vector<Json::Value> Pages(ClientContext &context, const string &url, const string &token, const string &field,
+                          bool fabric = false) {
 	vector<Json::Value> result;
 	std::set<string> seen;
 	string next;
@@ -96,7 +106,7 @@ vector<Json::Value> Pages(const string &url, const string &token, const string &
 			page_url += (url.find('?') == string::npos ? "?" : "&");
 			page_url += (fabric ? "continuationToken=" : "page_token=") + Encode(next);
 		}
-		auto page = Get(page_url, token);
+		auto page = Get(context, page_url, token);
 		if (!page[field].isArray()) {
 			throw IOException("OneLake catalog response omitted its entry list");
 		}
@@ -157,6 +167,11 @@ vector<string> Names(const vector<Json::Value> &entries) {
 } // namespace
 
 string OneLakeTableAPI::Token(ClientContext &context, OneLakeCredentials &credentials, OneLakeTokenAudience audience) {
+	auto metrics = OneLakeReadMetrics::Get(context);
+	OneLakeReadTimer timer(metrics, ReadPhase::SHARED, ReadMetric::TOKEN_NS);
+	if (metrics) {
+		metrics->Add(ReadPhase::SHARED, ReadMetric::TOKEN_CALLS, 1);
+	}
 	auto token = OneLakeAPI::GetAccessToken(credentials, audience, &context);
 	if (token.size() > 65536 || token.find_first_of("\r\n") != string::npos) {
 		throw IOException("Invalid OneLake caller token");
@@ -212,7 +227,7 @@ OneLakeLakehouse OneLakeTableAPI::ResolveItem(ClientContext &context, const stri
 	}
 	string id = IsGuid(item) ? StringUtil::Lower(item) : item;
 	if (!IsGuid(id)) {
-		auto entries = Pages("https://api.fabric.microsoft.com/v1/workspaces/" + workspace_id + "/items",
+		auto entries = Pages(context, "https://api.fabric.microsoft.com/v1/workspaces/" + workspace_id + "/items",
 		                     Token(context, credentials, OneLakeTokenAudience::Fabric), "value", true);
 		id.clear();
 		for (const auto &entry : entries) {
@@ -227,8 +242,9 @@ OneLakeLakehouse OneLakeTableAPI::ResolveItem(ClientContext &context, const stri
 			throw CatalogException("OneLake item not found; use an accessible item name or GUID");
 		}
 	}
-	auto root = Get("https://onelake.table.fabric.microsoft.com/api/v2/" + workspace_id + "/" + id + "/endpoints",
-	                Token(context, credentials));
+	auto root =
+	    Get(context, "https://onelake.table.fabric.microsoft.com/api/v2/" + workspace_id + "/" + id + "/endpoints",
+	        Token(context, credentials));
 	if (root["workspace"]["id"].asString() != workspace_id || !root["items"].isArray()) {
 		throw IOException("OneLake discovery identity mismatch");
 	}
@@ -263,15 +279,15 @@ OneLakeLakehouse OneLakeTableAPI::ResolveItem(ClientContext &context, const stri
 
 vector<string> OneLakeTableAPI::Schemas(ClientContext &context, const OneLakeLakehouse &item,
                                         OneLakeCredentials &credentials) {
-	return Names(Pages(item.table_catalog_url + "/schemas?catalog_name=" + Encode(item.id), Token(context, credentials),
-	                   "schemas"));
+	return Names(Pages(context, item.table_catalog_url + "/schemas?catalog_name=" + Encode(item.id),
+	                   Token(context, credentials), "schemas"));
 }
 
 vector<string> OneLakeTableAPI::Tables(ClientContext &context, const OneLakeLakehouse &item, const string &schema,
                                        OneLakeCredentials &credentials) {
-	return Names(
-	    Pages(item.table_catalog_url + "/tables?catalog_name=" + Encode(item.id) + "&schema_name=" + Encode(schema),
-	          Token(context, credentials), "tables"));
+	return Names(Pages(
+	    context, item.table_catalog_url + "/tables?catalog_name=" + Encode(item.id) + "&schema_name=" + Encode(schema),
+	    Token(context, credentials), "tables"));
 }
 
 } // namespace duckdb
