@@ -14,21 +14,51 @@ concurrency:
 jobs:
   duckdb-stable-build:
     name: Build extension binaries
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.4.1
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.4.2
     with:
-      duckdb_version: v1.4.1
-      ci_tools_version: v1.4.1
+      duckdb_version: v1.4.2
+      ci_tools_version: v1.4.2
       extension_name: onelake
       extra_toolchains: 'rust'
-      exclude_archs: windows_amd64_mingw
+      exclude_archs: 'linux_amd64_musl;windows_amd64_mingw;windows_arm64;wasm_mvp;wasm_eh;wasm_threads'
+      reduced_ci_mode: disabled
 
   code-quality-check:
     name: Code Quality Check
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@v1.4.1
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@v1.4.2
     with:
-      duckdb_version: v1.4.1
-      ci_tools_version: v1.4.1
+      duckdb_version: v1.4.2
+      ci_tools_version: v1.4.2
       extension_name: onelake
       # format_checks += 'format;tidy' to enable both format and tidy checks
       format_checks: 'format'
       extra_toolchains: 'rust'
+
+  reader-checks:
+    name: Offline reader checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-14]
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check reader formatting
+        working-directory: rust/onelake_table_reader
+        run: cargo fmt --check
+      - name: Test reader without live access
+        working-directory: rust/onelake_table_reader
+        run: cargo test --locked
+      - name: Lint reader
+        working-directory: rust/onelake_table_reader
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test benchmark parsing
+        run: python -m unittest discover -s test -p test_benchmark_reads.py

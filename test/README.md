@@ -10,6 +10,29 @@ or
 make test_debug
 ```
 
+## Compatibility and CI
+
+The native extension is currently built and tested locally against **DuckDB
+v1.4.2** on Windows x64 MSVC. Load it with that DuckDB version; a successful build
+does not establish compatibility with another version's native extension ABI.
+
+The distribution and code-quality workflow uses v1.4.2 for DuckDB and its CI
+tools. Its configured native targets are Linux x64/ARM64, macOS x64/ARM64 and
+Windows x64 MSVC. Reduced-matrix mode is disabled. WebAssembly, Windows ARM64,
+MinGW and Linux musl are excluded from this initial matrix.
+
+An independent offline job runs the Rust reader's locked tests, formatting and
+strict Clippy checks, plus the Python benchmark tests, on Linux, Windows and
+macOS runners. These checks use no Fabric credentials. The ignored live reader
+test is not enabled. The native cache suite remains an explicit test target;
+run it using the instructions below.
+
+**Configured CI is not completed platform validation.** Hosted runs must pass
+before claiming support for those targets; local Windows results do not prove
+POSIX cache admission or other platforms' behavior. Restricted-identity RLS/CLS
+and revocation checks, independent write authorization, and release/signing
+decisions remain separate gates. This workflow does not publish a release.
+
 ## Read-mode benchmark
 
 `benchmark_reads.py` compares TABLE_API and DIRECT_FILES using the native shell.
