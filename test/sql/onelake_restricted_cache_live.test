@@ -1,0 +1,291 @@
+# name: test/sql/onelake_restricted_cache_live.test
+# description: Opt-in restricted publicholidays TTL reuse with a static policy
+# group: [sql]
+
+require onelake
+
+require-env ONELAKE_LIVE_RESTRICTED_READ_APPROVED true
+
+require-env ONELAKE_TEST_WORKSPACE
+
+require-env ONELAKE_TEST_ITEM
+
+require-env ONELAKE_TEST_SCHEMA
+
+require-env ONELAKE_TEST_TABLE
+
+require-env ONELAKE_TEST_COUNTRY
+
+require parquet
+
+statement ok
+SET memory_limit='1GB';
+
+# Keep authorized values in managed memory only, without modifying a disk directory.
+statement ok
+SET temp_directory='';
+
+statement ok
+SET enable_external_file_cache=true;
+
+statement ok
+SET onelake_enable_read_metrics=true;
+
+statement ok
+CREATE SECRET restricted_reader (TYPE ONELAKE, PROVIDER credential_chain, CHAIN 'env');
+
+statement ok
+ATTACH '${ONELAKE_TEST_WORKSPACE}/${ONELAKE_TEST_ITEM}' AS fresh (TYPE ONELAKE, READ_MODE 'TABLE_API', READ_CACHE 'OFF', READ_ONLY);
+
+statement ok
+CREATE TEMP TABLE authorized_reference AS
+SELECT * FROM fresh."${ONELAKE_TEST_SCHEMA}"."${ONELAKE_TEST_TABLE}" LIMIT 100001;
+
+query III
+SELECT COUNT(*) BETWEEN 10 AND 100000,
+       COUNT(*) FILTER (WHERE countryOrRegion IS DISTINCT FROM '${ONELAKE_TEST_COUNTRY}') = 0,
+       (SELECT value FROM onelake_read_metrics() WHERE phase='execution' AND metric='completions') = 1
+FROM authorized_reference;
+----
+true	true	true
+
+statement ok
+CREATE TEMP VIEW counters AS
+SELECT
+    SUM(value) FILTER (WHERE phase='execution' AND metric='allocation_requests') AS allocations,
+    SUM(value) FILTER (WHERE phase='execution' AND metric='stream_bytes') AS bytes,
+    SUM(value) FILTER (WHERE phase='schema' AND metric='allocation_requests') AS schemas,
+    SUM(value) FILTER (WHERE phase='execution' AND metric='completions') AS completions
+FROM onelake_read_metrics();
+
+statement ok
+PREPARE off_sample AS SELECT countryOrRegion FROM fresh."${ONELAKE_TEST_SCHEMA}"."${ONELAKE_TEST_TABLE}" LIMIT 1;
+
+statement ok
+CREATE TEMP TABLE before_case AS SELECT * FROM counters;
+
+query T
+EXECUTE off_sample;
+----
+${ONELAKE_TEST_COUNTRY}
+
+query T
+EXECUTE off_sample;
+----
+${ONELAKE_TEST_COUNTRY}
+
+query II
+SELECT allocations - (SELECT allocations FROM before_case) = 2,
+       schemas - (SELECT schemas FROM before_case) = 2 FROM counters;
+----
+true	true
+
+statement ok
+DEALLOCATE off_sample;
+
+statement ok
+ATTACH '${ONELAKE_TEST_WORKSPACE}/${ONELAKE_TEST_ITEM}' AS cached (TYPE ONELAKE, READ_MODE 'TABLE_API', READ_CACHE 'PARQUET', READ_CACHE_TTL_SECONDS 300, READ_ONLY);
+
+statement ok
+PREPARE cached_sample AS SELECT countryOrRegion FROM cached."${ONELAKE_TEST_SCHEMA}"."${ONELAKE_TEST_TABLE}" LIMIT 1;
+
+statement ok
+CREATE OR REPLACE TEMP TABLE before_case AS SELECT * FROM counters;
+
+query T
+EXECUTE cached_sample;
+----
+${ONELAKE_TEST_COUNTRY}
+
+query I
+SELECT allocations - (SELECT allocations FROM before_case) = 1 FROM counters;
+----
+true
+
+statement ok
+CREATE OR REPLACE TEMP TABLE before_case AS SELECT * FROM counters;
+
+query T
+EXECUTE cached_sample;
+----
+${ONELAKE_TEST_COUNTRY}
+
+query III
+SELECT allocations = (SELECT allocations FROM before_case),
+       bytes = (SELECT bytes FROM before_case),
+       schemas - (SELECT schemas FROM before_case) = 1 FROM counters;
+----
+true	true	true
+
+# The previous country projection cannot supply the date column.
+statement ok
+CREATE OR REPLACE TEMP TABLE before_case AS SELECT * FROM counters;
+
+query I
+SELECT (SELECT COUNT(date) FROM cached."${ONELAKE_TEST_SCHEMA}"."${ONELAKE_TEST_TABLE}")
+     = (SELECT COUNT(date) FROM authorized_reference);
+----
+true
+
+query II
+SELECT allocations - (SELECT allocations FROM before_case) = 1,
+       completions - (SELECT completions FROM before_case) = 1 FROM counters;
+----
+true	true
+
+statement ok
+CREATE OR REPLACE TEMP TABLE before_case AS SELECT * FROM counters;
+
+query I
+SELECT (SELECT COUNT(date) FROM cached."${ONELAKE_TEST_SCHEMA}"."${ONELAKE_TEST_TABLE}")
+     = (SELECT COUNT(date) FROM authorized_reference);
+----
+true
+
+query III
+SELECT allocations = (SELECT allocations FROM before_case),
+       bytes = (SELECT bytes FROM before_case),
+       schemas - (SELECT schemas FROM before_case) = 1 FROM counters;
+----
+true	true	true
+
+# Full six-column fills/hits preserve values and duplicate rows, not just counts.
+statement ok
+CREATE OR REPLACE TEMP TABLE before_case AS SELECT * FROM counters;
+
+statement ok
+CREATE TEMP TABLE full_fill AS SELECT * FROM cached."${ONELAKE_TEST_SCHEMA}"."${ONELAKE_TEST_TABLE}";
+
+query II
+SELECT allocations - (SELECT allocations FROM before_case) = 1,
+       completions - (SELECT completions FROM before_case) = 1 FROM counters;
+----
+true	true
+
+statement ok
+CREATE OR REPLACE TEMP TABLE before_case AS SELECT * FROM counters;
+
+statement ok
+CREATE TEMP TABLE full_hit AS SELECT * FROM cached."${ONELAKE_TEST_SCHEMA}"."${ONELAKE_TEST_TABLE}";
+
+query III
+SELECT allocations = (SELECT allocations FROM before_case),
+       bytes = (SELECT bytes FROM before_case),
+       schemas - (SELECT schemas FROM before_case) = 1 FROM counters;
+----
+true	true	true
+
+query IIII
+SELECT NOT EXISTS (SELECT * FROM full_fill EXCEPT ALL SELECT * FROM authorized_reference),
+       NOT EXISTS (SELECT * FROM authorized_reference EXCEPT ALL SELECT * FROM full_fill),
+       NOT EXISTS (SELECT * FROM full_hit EXCEPT ALL SELECT * FROM authorized_reference),
+       NOT EXISTS (SELECT * FROM authorized_reference EXCEPT ALL SELECT * FROM full_hit);
+----
+true	true	true	true
+
+query I
+SELECT COUNT(*) > 0 FROM duckdb_external_file_cache() WHERE path LIKE 'onelake-cache://%';
+----
+true
+
+statement ok
+DEALLOCATE cached_sample;
+
+statement ok
+DETACH cached;
+
+query I
+SELECT COUNT(*) FROM duckdb_external_file_cache() WHERE path LIKE 'onelake-cache://%';
+----
+0
+
+# Demonstrate a real admitted hit before expiry, then expiry and a new generation.
+# A slow service can consume this TTL during fill/binding: fail rather than claim a hit.
+statement ok
+ATTACH '${ONELAKE_TEST_WORKSPACE}/${ONELAKE_TEST_ITEM}' AS expiring (TYPE ONELAKE, READ_MODE 'TABLE_API', READ_CACHE 'PARQUET', READ_CACHE_TTL_SECONDS 20, READ_ONLY);
+
+statement ok
+PREPARE expiring_sample AS SELECT countryOrRegion FROM expiring."${ONELAKE_TEST_SCHEMA}"."${ONELAKE_TEST_TABLE}" LIMIT 1;
+
+statement ok
+CREATE OR REPLACE TEMP TABLE before_case AS SELECT * FROM counters;
+
+query T
+EXECUTE expiring_sample;
+----
+${ONELAKE_TEST_COUNTRY}
+
+query I
+SELECT allocations - (SELECT allocations FROM before_case) = 1 FROM counters;
+----
+true
+
+statement ok
+CREATE OR REPLACE TEMP TABLE before_case AS SELECT * FROM counters;
+
+query T
+EXECUTE expiring_sample;
+----
+${ONELAKE_TEST_COUNTRY}
+
+query III
+SELECT allocations = (SELECT allocations FROM before_case),
+       bytes = (SELECT bytes FROM before_case),
+       schemas - (SELECT schemas FROM before_case) = 1 FROM counters;
+----
+true	true	true
+
+sleep 21 second
+
+query T
+EXECUTE expiring_sample;
+----
+${ONELAKE_TEST_COUNTRY}
+
+query II
+SELECT allocations - (SELECT allocations FROM before_case) = 1,
+       bytes > (SELECT bytes FROM before_case) FROM counters;
+----
+true	true
+
+statement ok
+CREATE OR REPLACE TEMP TABLE before_case AS SELECT * FROM counters;
+
+query T
+EXECUTE expiring_sample;
+----
+${ONELAKE_TEST_COUNTRY}
+
+query III
+SELECT allocations = (SELECT allocations FROM before_case),
+       bytes = (SELECT bytes FROM before_case),
+       schemas - (SELECT schemas FROM before_case) = 1 FROM counters;
+----
+true	true	true
+
+statement ok
+DEALLOCATE expiring_sample;
+
+statement ok
+DETACH expiring;
+
+query I
+SELECT COUNT(*) FROM duckdb_external_file_cache() WHERE path LIKE 'onelake-cache://%';
+----
+0
+
+# Recheck the authorized reference after caching; source/policy drift fails the fixture.
+statement ok
+CREATE TEMP TABLE final_fresh AS SELECT * FROM fresh."${ONELAKE_TEST_SCHEMA}"."${ONELAKE_TEST_TABLE}";
+
+query II
+SELECT NOT EXISTS (SELECT * FROM final_fresh EXCEPT ALL SELECT * FROM authorized_reference),
+       NOT EXISTS (SELECT * FROM authorized_reference EXCEPT ALL SELECT * FROM final_fresh);
+----
+true	true
+
+statement ok
+DETACH fresh;
+
+statement ok
+DROP SECRET restricted_reader;

@@ -316,6 +316,34 @@ API failure or establish revocation timing, CLS enforcement, or write permission
 Reads allocate billed sessions. Reports should retain assertions and counters,
 not individual rows or credentials.
 
+`sql/onelake_restricted_cache_live.test` uses the same approval, credentials and
+public-holidays fixture. Run it separately or select both files with a
+comma-separated SQLLogicTest filter:
+
+```powershell
+& .\build\release\test\unittest.exe 'test/sql/onelake_restricted_cache_live.test'
+```
+
+It uses memory-only managed caching (`temp_directory=''`, `memory_limit='1GB'`),
+without creating spill directories. It checks OFF reads, a 300-second TTL
+projection fill/hit, missing-column misses, complete six-column fills/hits,
+prepared execution, zero execution-body bytes on hits, fresh schema allocations
+and removal of owned external-file-cache ranges on DETACH. Full results are
+compared as multisets with fresh authorized data, including duplicate/NULL/string
+values. Samples use simple unordered projections so partial reuse is eligible.
+
+A separate 20-second TTL fixture requires a genuine hit before waiting 21 seconds,
+then verifies a fresh read and reuse of the replacement generation. Slow service
+allocation/binding can consume that TTL and fail the live test; a miss must not be
+misreported as an expiry test of a retained entry. Exact TTL boundaries and
+non-sliding behavior also have deterministic native coverage.
+
+These are **static-policy RLS cache tests**, not a revocation test or proof of
+current authorization on a hit. They do not change policies or force token
+refresh. Keep caching OFF for fresh service-authorized reads; the documented
+TTL staleness window and service propagation caveats still apply. Neither
+fixture enables live access in CI.
+
 ### General reader checks
 
 ATTACH defaults to the existing `DIRECT_FILES` reader. Secured Arrow tests must
