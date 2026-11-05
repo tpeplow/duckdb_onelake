@@ -1,0 +1,174 @@
+# name: test/sql/onelake_restricted_read_live.test
+# description: Opt-in restricted publicholidays reads with no raw-file fallback
+# group: [sql]
+
+require onelake
+
+require-env ONELAKE_LIVE_RESTRICTED_READ_APPROVED true
+
+require-env ONELAKE_TEST_WORKSPACE
+
+require-env ONELAKE_TEST_ITEM
+
+require-env ONELAKE_TEST_SCHEMA
+
+require-env ONELAKE_TEST_TABLE
+
+require-env ONELAKE_TEST_COUNTRY
+
+require parquet
+
+statement ok
+SET enable_external_file_cache=false;
+
+statement ok
+SET temp_directory='';
+
+statement ok
+SET onelake_enable_read_metrics=true;
+
+statement ok
+CREATE SECRET restricted_reader (TYPE ONELAKE, PROVIDER credential_chain, CHAIN 'env');
+
+statement ok
+ATTACH '${ONELAKE_TEST_WORKSPACE}/${ONELAKE_TEST_ITEM}' AS restricted_read (TYPE ONELAKE, READ_MODE 'TABLE_API', READ_CACHE 'OFF', READ_ONLY);
+
+# Retain the authorized reference only in this process, never in the report.
+statement ok
+CREATE TEMP TABLE authorized_reference AS
+SELECT * FROM restricted_read."${ONELAKE_TEST_SCHEMA}"."${ONELAKE_TEST_TABLE}" LIMIT 100001;
+
+query III
+SELECT COUNT(*) BETWEEN 10 AND 100000,
+       COUNT(*) FILTER (WHERE countryOrRegion IS DISTINCT FROM '${ONELAKE_TEST_COUNTRY}') = 0,
+       COUNT(DISTINCT countryOrRegion) = 1
+FROM authorized_reference;
+----
+true	true	true
+
+# The reference must be complete, not merely a bounded sample.
+query II
+SELECT
+    (SELECT value FROM onelake_read_metrics() WHERE phase='execution' AND metric='completions') = 1,
+    (SELECT value FROM onelake_read_metrics() WHERE phase='execution' AND metric='rows') = (SELECT COUNT(*) FROM authorized_reference);
+----
+true	true
+
+# COUNT(*) must count rows even when its chosen carrier is nullable.
+query I
+SELECT (SELECT COUNT(*) FROM restricted_read."${ONELAKE_TEST_SCHEMA}"."${ONELAKE_TEST_TABLE}")
+     = (SELECT COUNT(*) FROM authorized_reference);
+----
+true
+
+query I
+SELECT
+    (SELECT ROW(COUNT(*), COUNT(isPaidTimeOff), COUNT(date), MIN(date), MAX(date),
+                COUNT(*) FILTER (WHERE isPaidTimeOff IS NULL))
+     FROM restricted_read."${ONELAKE_TEST_SCHEMA}"."${ONELAKE_TEST_TABLE}")
+    IS NOT DISTINCT FROM
+    (SELECT ROW(COUNT(*), COUNT(isPaidTimeOff), COUNT(date), MIN(date), MAX(date),
+                COUNT(*) FILTER (WHERE isPaidTimeOff IS NULL))
+     FROM authorized_reference);
+----
+true
+
+# Reordered projected columns, including UTF-8 strings, preserve the multiset.
+query I
+WITH actual AS MATERIALIZED (
+    SELECT date, normalizeHolidayName, isPaidTimeOff, holidayName, countryRegionCode, countryOrRegion
+    FROM restricted_read."${ONELAKE_TEST_SCHEMA}"."${ONELAKE_TEST_TABLE}"
+), expected AS (
+    SELECT date, normalizeHolidayName, isPaidTimeOff, holidayName, countryRegionCode, countryOrRegion
+    FROM authorized_reference
+)
+SELECT NOT EXISTS (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected)
+   AND NOT EXISTS (SELECT * FROM expected EXCEPT ALL SELECT * FROM actual);
+----
+true
+
+query I
+SELECT
+    (SELECT COUNT(*) FROM restricted_read."${ONELAKE_TEST_SCHEMA}"."${ONELAKE_TEST_TABLE}"
+     WHERE date >= TIMESTAMPTZ '2000-01-01 00:00:00+00' AND isPaidTimeOff IS TRUE)
+    =
+    (SELECT COUNT(*) FROM authorized_reference
+     WHERE date >= TIMESTAMPTZ '2000-01-01 00:00:00+00' AND isPaidTimeOff IS TRUE);
+----
+true
+
+# A local predicate cannot recover rows excluded by the service.
+query I
+SELECT COUNT(*) FROM restricted_read."${ONELAKE_TEST_SCHEMA}"."${ONELAKE_TEST_TABLE}"
+WHERE countryOrRegion IS DISTINCT FROM '${ONELAKE_TEST_COUNTRY}';
+----
+0
+
+query I
+SELECT
+    (SELECT COUNT(*) FROM restricted_read."${ONELAKE_TEST_SCHEMA}"."${ONELAKE_TEST_TABLE}" a
+     JOIN restricted_read."${ONELAKE_TEST_SCHEMA}"."${ONELAKE_TEST_TABLE}" b
+       ON a.date=b.date AND a.countryOrRegion=b.countryOrRegion)
+    =
+    (SELECT COUNT(*) FROM authorized_reference a JOIN authorized_reference b
+       ON a.date=b.date AND a.countryOrRegion=b.countryOrRegion);
+----
+true
+
+statement ok
+PREPARE restricted_prepared AS
+SELECT COUNT(*) = (SELECT COUNT(*) FROM authorized_reference)
+   AND COUNT(*) FILTER (WHERE countryOrRegion IS DISTINCT FROM '${ONELAKE_TEST_COUNTRY}') = 0
+FROM restricted_read."${ONELAKE_TEST_SCHEMA}"."${ONELAKE_TEST_TABLE}";
+
+statement ok
+CREATE TEMP TABLE before_prepared AS SELECT * FROM onelake_read_metrics();
+
+query I
+EXECUTE restricted_prepared;
+----
+true
+
+query I
+EXECUTE restricted_prepared;
+----
+true
+
+query II
+SELECT
+    (SELECT value FROM onelake_read_metrics() WHERE phase='execution' AND metric='allocation_requests')
+      - (SELECT value FROM before_prepared WHERE phase='execution' AND metric='allocation_requests') = 2,
+    (SELECT value FROM onelake_read_metrics() WHERE phase='schema' AND metric='allocation_requests')
+      - (SELECT value FROM before_prepared WHERE phase='schema' AND metric='allocation_requests') = 2;
+----
+true	true
+
+statement ok
+DEALLOCATE restricted_prepared;
+
+statement ok
+LOAD azure;
+
+statement ok
+LOAD delta;
+
+statement ok
+ATTACH '${ONELAKE_TEST_WORKSPACE}/${ONELAKE_TEST_ITEM}' AS restricted_files (TYPE ONELAKE, READ_MODE 'DIRECT_FILES', READ_ONLY);
+
+# This may fail at catalog discovery, so separately probe storage for file-denial evidence.
+statement error
+SELECT countryOrRegion FROM restricted_files."${ONELAKE_TEST_SCHEMA}"."${ONELAKE_TEST_TABLE}" LIMIT 1;
+----
+<REGEX>:.*HTTP (401|403).*
+
+statement ok
+DETACH restricted_files;
+
+statement ok
+DETACH restricted_read;
+
+statement ok
+DROP TABLE authorized_reference;
+
+statement ok
+DROP SECRET restricted_reader;

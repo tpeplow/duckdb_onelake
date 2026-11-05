@@ -276,6 +276,48 @@ has been established. TTL is an explicitly weaker alternative, not that validato
 
 ## Rust table reader
 
+### Restricted public-holidays fixture
+
+`sql/onelake_restricted_read_live.test` is a separate, opt-in security fixture.
+Set `ONELAKE_LIVE_RESTRICTED_READ_APPROVED=true`, `ONELAKE_TEST_WORKSPACE`,
+`ONELAKE_TEST_ITEM`, `ONELAKE_TEST_SCHEMA`, `ONELAKE_TEST_TABLE`, and
+`ONELAKE_TEST_COUNTRY`. Supply `AZURE_STORAGE_TOKEN` and `FABRIC_API_TOKEN` only
+in memory for the same restricted caller; this fixture uses the `env` provider.
+The country and identifier substitutions are trusted test configuration, not
+untrusted input; do not include SQL quotes or shell delimiters in those values.
+
+The target must have the public-holidays columns `countryOrRegion`, `holidayName`,
+`normalizeHolidayName`, `isPaidTimeOff`, `countryRegionCode`, and `date`, with
+10-100,000 visible rows restricted to the configured country. Direct-file reads
+must be denied. Configure the policies separately; the test never changes them.
+
+```powershell
+# Set the approved target and in-memory credentials first.
+$env:ONELAKE_LIVE_RESTRICTED_READ_APPROVED = 'true'
+$env:ONELAKE_TEST_COUNTRY = 'Australia'
+$env:UNITTEST_ROOT_DIRECTORY = '.'
+& .\build\release\test\unittest.exe 'test/sql/onelake_restricted_read_live.test'
+```
+
+The fixture keeps an authorized reference in process memory, verifies completion
+below its row cap, and compares counts, NULL-aware aggregates, reordered
+projections, local predicates, a self-join, and repeated prepared execution.
+Both caches are disabled; metric assertions require fresh service allocations.
+No exact row count is hardcoded. Keep the source and policy stable during the
+test: independent allocations do not share a guaranteed snapshot. The reference
+is caller-visible data, not an unrestricted physical-table baseline.
+
+The direct-file assertion accepts only HTTP 401/403, not arbitrary SQL failures.
+It can fail at catalog discovery, which is not evidence that a storage read was
+attempted. Independently test a known table file through its discovered DFS route
+when reporting raw-file denial. Successful secured reads alongside storage denial
+demonstrate the supported restricted path; these checks do not simulate a Table
+API failure or establish revocation timing, CLS enforcement, or write permission.
+Reads allocate billed sessions. Reports should retain assertions and counters,
+not individual rows or credentials.
+
+### General reader checks
+
 ATTACH defaults to the existing `DIRECT_FILES` reader. Secured Arrow tests must
 explicitly select `READ_MODE 'TABLE_API'`; neither mode falls back to the other.
 `sql/onelake_read_modes.test` covers mode validation, READ_ONLY enforcement,
