@@ -289,6 +289,64 @@ The `onelake_env_fabric_token_variable` and `onelake_env_storage_token_variable`
 DuckDB setting. Set them *before* `CREATE SECRET` when you want the extension to remember different variable names.
 When left untouched they continue to default to `FABRIC_API_TOKEN` and `AZURE_STORAGE_TOKEN` respectively.
 
+### Runtime inputs for opt-in live tests
+
+Keep actual workspace/item/tenant IDs, local paths, credentials and generated
+reports out of tracked files. Supply target settings through environment variables
+in the launching process; acquire tokens from the signed-in Azure CLI identity
+without printing them or pasting them into scripts or shell history. Any local
+configuration file or report should live outside this checkout. The committed
+SQL fixtures contain environment-variable references and synthetic offline IDs,
+not a configured live target.
+
+For the [restricted public-holidays tests](test/README.md#restricted-public-holidays-fixture),
+run the following from the repository root in a dedicated PowerShell process
+after signing in with `az login`. Only approve a target that meets the fixture's
+documented schema, country restriction and denied-file-access requirements.
+Inputs are trusted test configuration: do not include SQL quotes or newlines.
+
+```powershell
+$env:ONELAKE_TEST_WORKSPACE = Read-Host 'Approved workspace GUID'
+$env:ONELAKE_TEST_ITEM = Read-Host 'Approved item GUID'
+$env:ONELAKE_TEST_SCHEMA = Read-Host 'Schema name'
+$env:ONELAKE_TEST_TABLE = Read-Host 'Table name'
+$env:ONELAKE_TEST_COUNTRY = Read-Host 'Only country this caller should see'
+$env:ONELAKE_LIVE_RESTRICTED_READ_APPROVED = 'true'
+$env:UNITTEST_ROOT_DIRECTORY = '.'
+
+try {
+    $env:AZURE_STORAGE_TOKEN = az account get-access-token `
+        --resource 'https://storage.azure.com' --query accessToken -o tsv
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($env:AZURE_STORAGE_TOKEN)) {
+        throw 'Storage token acquisition failed'
+    }
+    $env:FABRIC_API_TOKEN = az account get-access-token `
+        --resource 'https://api.fabric.microsoft.com/' --query accessToken -o tsv
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($env:FABRIC_API_TOKEN)) {
+        throw 'Fabric token acquisition failed'
+    }
+    & .\build\release\test\unittest.exe `
+        'test/sql/onelake_restricted_read_live.test,test/sql/onelake_restricted_cache_live.test'
+    if ($LASTEXITCODE -ne 0) { throw 'Restricted live tests failed' }
+}
+finally {
+    Remove-Item Env:AZURE_STORAGE_TOKEN, Env:FABRIC_API_TOKEN -ErrorAction SilentlyContinue
+    Remove-Item Env:ONELAKE_LIVE_RESTRICTED_READ_APPROVED -ErrorAction SilentlyContinue
+}
+```
+
+These tests use `CHAIN 'env'` and do not persist secrets or modify remote data or
+policies. Azure CLI may return an unexpired cached token; acquisition does not
+force new issuance. Environment variables are process configuration, not an
+encrypted secret store; use a trusted host and do not enable credential tracing.
+
+Pass benchmark paths at runtime with `test/benchmark_reads.py --shell <duckdb-path>
+--output <new-report-path-outside-checkout>` alongside its required target and
+approval arguments. For disk-backed cache tests, supply a new fixture path to
+`test/cache/run.ps1 -TempDirectory <new-private-directory-outside-checkout>`.
+The restricted TTL fixture instead uses memory-only caching, with no disk path.
+See [test instructions](test/README.md) for the complete commands and prerequisites.
+
 ### Writing to OneLake tables
 
 `INSERT` now streams chunks into the Delta writer that ships with this repository. A few tips:
