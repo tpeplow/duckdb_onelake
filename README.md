@@ -167,6 +167,28 @@ For more detailed documentation on the Onelake extension, including architecture
 
 ## Running the extension
 
+### Local unsigned Windows package
+
+The local experimental package targets **Windows x64 and DuckDB v1.4.2 only**.
+Its release label is `OneLakeReadAPI-<short-SHA>`, using the packaged source
+commit. Linux/macOS qualification is not implied. Building and checking this
+package does not require GitHub Actions or publishing a release.
+
+Extract the archive, verify its SHA-256 checksum, and start an official DuckDB
+v1.4.2 Windows x64 executable with `-unsigned`. From the extracted directory:
+
+```sql
+LOAD '.\onelake.duckdb_extension';
+SELECT extension_name, loaded FROM duckdb_extensions()
+WHERE extension_name = 'onelake';
+```
+
+Use the authentication and read-mode examples above to connect to an approved
+table. No credentials or target IDs are included in the package. The DuckDB
+executable is obtained separately; the Microsoft Visual C++ x64 runtime may
+also be required. Package metadata records the exact source revision and
+validation scope. Unsigned loading is for trusted experimental binaries only.
+
 # Prerequisites
 To use the Onelake extension, you need to have access to a OneLake workspace and lakehouse. You will also need to have the necessary credentials for a service principal, azure cli, or an azure storage token & Fabric token (tenant ID, client ID, and client secret) to authenticate with Azure, this extension was tested using a Workspace identity. Please follow the steps documented here : https://learn.microsoft.com/en-us/fabric/security/workspace-identity.
 

@@ -27,11 +27,12 @@ macOS runners. These checks use no Fabric credentials. The ignored live reader
 test is not enabled. The native cache suite remains an explicit test target;
 run it using the instructions below.
 
-**Configured CI is not completed platform validation.** Hosted runs must pass
-before claiming support for those targets; local Windows results do not prove
-POSIX cache admission or other platforms' behavior. Platform qualification and
-release/signing decisions remain separate gates. This workflow does not publish
-a release.
+**Configured CI is not completed platform validation.** Builds and tests must
+pass on a platform before claiming support for it; they may run locally.
+Local Windows results do not prove POSIX cache admission or other platforms'
+behavior. The local unsigned experimental package is Windows x64 only and uses
+no GitHub Actions. The wider matrix above is not a support claim, and the
+workflow configuration does not publish a release.
 
 The required live integration scope is a read-only smoke check: authenticate,
 discover an approved table through `READ_MODE 'TABLE_API'`, and successfully
