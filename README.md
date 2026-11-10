@@ -130,8 +130,10 @@ requests; an in-progress Rust read does not renew tokens or retry after failures
 Switch identities by detaching and reattaching. Reattach after catalog/schema
 changes; TABLE_API does not automatically discard entries used by prepared queries.
 
-See [reader test instructions and limits](test/README.md). Live RLS/CLS policy
-matrices, native Iceberg fixtures and non-Windows builds remain release gates.
+See [reader test instructions and limits](test/README.md). Live integration checks
+authenticated discovery and reads through the Table API, not OneLake's RLS/CLS
+enforcement or permission-propagation behavior. Native Iceberg fixtures and
+non-Windows builds remain separate qualification work.
 
 For opt-in transfer, decoding and native scan timings, enable
 `SET onelake_enable_read_metrics=true` and query `onelake_read_metrics()`.

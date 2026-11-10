@@ -29,9 +29,17 @@ run it using the instructions below.
 
 **Configured CI is not completed platform validation.** Hosted runs must pass
 before claiming support for those targets; local Windows results do not prove
-POSIX cache admission or other platforms' behavior. Restricted-identity RLS/CLS
-and revocation checks, independent write authorization, and release/signing
-decisions remain separate gates. This workflow does not publish a release.
+POSIX cache admission or other platforms' behavior. Platform qualification and
+release/signing decisions remain separate gates. This workflow does not publish
+a release.
+
+The required live integration scope is a read-only smoke check: authenticate,
+discover an approved table through `READ_MODE 'TABLE_API'`, and successfully
+consume its returned schema and data with caching OFF. Existing approved live
+reader tests cover this path. OneLake RLS/CLS policy matrices, permission changes
+and revocation timing are not acceptance requirements for this extension.
+The opt-in restricted fixtures below remain optional additional coverage, not
+a requirement to provision or change security policies.
 
 ## Read-mode benchmark
 
