@@ -66,9 +66,8 @@ For this mode, GUIDs avoid requiring Fabric item-list permissions, and the Azure
 file secret is not needed. OneLake applies the caller's effective permissions;
 an elevated identity may still see unrestricted data.
 
-TABLE_API attachments are currently read-only. Independent write authorization
-and full writer-schema handling are not implemented yet; CREATE, INSERT, UPDATE,
-DELETE, ALTER and DROP are rejected in this mode. Existing file writes remain
+TABLE_API attachments are read-only; adding secured-mode writes is out of scope.
+CREATE, INSERT, UPDATE, DELETE, ALTER and DROP are rejected in this mode. Existing file writes remain
 available through DIRECT_FILES attachments (including the default) without
 READ_ONLY, subject to their existing limitations, service permissions and
 destructive-operation guards. The read-mode examples above use READ_ONLY to block writes.
@@ -78,6 +77,12 @@ authorized Arrow results, not the default direct-file reader. **Caching is OFF
 by default.** Leave it OFF when each query must obtain fresh service-authorized
 data: cached rows can outlive data or security-policy changes. A matching identity
 and fresh schema do not prove that row-level permissions are unchanged.
+
+**Permission changes do not automatically refresh or invalidate the cache.**
+Previously authorized rows may remain reusable until the TTL expires. If that
+is unacceptable, use `READ_CACHE 'OFF'`. Otherwise, choose a low positive
+`READ_CACHE_TTL_SECONDS` to reduce the local stale-permission window, not eliminate
+it. Fresh reads still depend on the service's own permission-propagation behavior.
 
 ```sql
 -- No local result reuse (also the default).

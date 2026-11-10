@@ -189,6 +189,9 @@ detect every policy change. The administrative dataAccessRoles API is not called
 TTL caching needs no additional administrative permission beyond normal read
 authorization. Leave caching OFF if this staleness is unacceptable. Fresh reads
 still follow the service's own authorization and propagation semantics.
+Permission changes do not automatically invalidate or refresh this cache.
+A low positive `READ_CACHE_TTL_SECONDS` reduces the local reuse window, but does
+not guarantee immediate revocation or bypass service-side propagation delays.
 
 The monotonic deadline starts immediately before opening the execution read.
 Allocation, transfer and encoding consume the TTL; hits and schema probes never
