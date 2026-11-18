@@ -60,6 +60,8 @@ python test\benchmark_reads.py --approved-live-read `
 
 The default disables DuckDB's external-file cache in both modes. Each workload
 uses a fresh process, alternating mode order, with three queries per process.
+Use `--threads <positive-integer>` to select DuckDB's thread budget (default 2).
+The Table API stream-worker cap is further limited by the actual allocated stream count.
 The harness checks aggregate result equality across repetitions and modes and
 refuses to overwrite reports. It records source revision, individual timings
 and configuration, not tokens or raw service output. First-use is not genuinely

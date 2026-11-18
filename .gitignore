@@ -40,5 +40,8 @@ _codeql_detected_source_root
 scripts/delta-write-test.py
 docs/create_update_plan.md
 docs/delta_write_support_plan.md
+# Failed local benchmark evidence
+/docs/benchmarks/store-returns-2026-11-18.json
+/docs/benchmarks/store-returns-2026-11-18.md
 duckdb_onelake/
 _codeql_detected_source_root

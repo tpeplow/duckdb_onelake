@@ -61,6 +61,21 @@ def comparable_result(case, rows):
     return rows
 
 
+def failure_reason(stderr):
+    status = re.search(r"\bHTTP ([1-5][0-9]{2})\b", stderr)
+    if status:
+        return "http_" + status[1]
+    for text, reason in (
+        ("OneLake transport failed", "transport_failure"),
+        ("Invalid, unsupported, or incomplete Arrow stream", "arrow_protocol_failure"),
+        ("session expired", "session_expired"),
+        ("Out of Memory", "out_of_memory"),
+    ):
+        if text in stderr:
+            return reason
+    return "unclassified_child_failure"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--approved-live-read", action="store_true", required=True)
@@ -71,6 +86,7 @@ def main():
     parser.add_argument("--table", required=True)
     parser.add_argument("--column", default="Price")
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--threads", type=int, default=2)
     parser.add_argument("--read-metrics", action="store_true")
     parser.add_argument("--prepared", action="store_true")
     parser.add_argument("--profile", action="store_true")
@@ -101,6 +117,8 @@ def main():
     args = parser.parse_args()
     if args.repeats < 1:
         parser.error("--repeats must be positive")
+    if args.threads < 1:
+        parser.error("--threads must be positive")
     if args.output.exists():
         parser.error("Refusing to overwrite an existing report")
     if any("\n" in v or "\r" in v for v in (args.schema, args.table, args.column)):
@@ -138,7 +156,7 @@ def main():
         "shell_sha256": hashlib.sha256(args.shell.read_bytes()).hexdigest(),
         "target": f"{args.workspace}/{args.item}/{args.schema}/{args.table}",
         "external_file_cache": args.external_file_cache == "true",
-        "threads": 2,
+        "threads": args.threads,
         "memory_limit": "4GB",
         "read_metrics": args.read_metrics,
         "prepared": args.prepared,
@@ -167,7 +185,7 @@ def main():
                 ".bail on",
                 ".mode json",
                 ".timer on",
-                "SET threads=2;",
+                f"SET threads={args.threads};",
                 "SET memory_limit='4GB';",
                 f"SET enable_external_file_cache={args.external_file_cache};",
                 "LOAD onelake;",
@@ -226,7 +244,16 @@ def main():
             )
             # Do not persist service errors, tokens, raw output or environment variables.
             if result.returncode:
-                raise RuntimeError(f"{mode}/{case} failed with exit code {result.returncode}")
+                reason = failure_reason(result.stderr)
+                report["failure"] = {
+                    "mode": mode,
+                    "case": case,
+                    "exit_code": result.returncode,
+                    "reason": reason,
+                    "query_markers": len(re.findall(r"^BENCH_QUERY_[0-9]+\r?$", result.stdout, re.M)),
+                }
+                args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+                raise RuntimeError(f"{mode}/{case} failed with exit code {result.returncode} ({reason})")
             runs = parse_runs(result.stdout)
             if len(runs) != args.repeats:
                 raise RuntimeError("Incomplete benchmark output")

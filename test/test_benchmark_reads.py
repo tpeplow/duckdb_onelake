@@ -1,9 +1,94 @@
+import contextlib
+import io
+import json
+from pathlib import Path
+import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
-from benchmark_reads import comparable_result, difference, parse_metrics, parse_runs
+from benchmark_reads import comparable_result, difference, failure_reason, main, parse_metrics, parse_runs
 
 
 class BenchmarkMetricsTest(unittest.TestCase):
+    def test_failure_diagnostics_do_not_copy_service_details(self):
+        self.assertEqual(
+            failure_reason("IO Error: OneLake read stream returned HTTP 429; sensitive service body"),
+            "http_429",
+        )
+        self.assertEqual(failure_reason("IO Error: OneLake transport failed"), "transport_failure")
+        self.assertEqual(failure_reason("sensitive unknown error body"), "unclassified_child_failure")
+
+    def test_threads_are_applied_to_sql_and_recorded_without_live_reads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            shell = Path(directory) / "shell.exe"
+            shell.write_bytes(b"offline fixture")
+            output = Path(directory) / "report.json"
+            arguments = [
+                "benchmark_reads.py",
+                "--approved-live-read",
+                "--shell",
+                str(shell),
+                "--workspace",
+                "00000000-0000-0000-0000-000000000001",
+                "--item",
+                "00000000-0000-0000-0000-000000000002",
+                "--schema",
+                "dbo",
+                "--table",
+                "fixture",
+                "--cases",
+                "count",
+                "--modes",
+                "TABLE_API",
+                "--repeats",
+                "1",
+                "--output",
+                str(output),
+            ]
+            result = SimpleNamespace(
+                returncode=0,
+                stdout='BENCH_QUERY_0\n[{"n":3}]\nRun Time (s): real 0.25 user 0.1 sys 0.0\nBENCH_DONE\n',
+            )
+            for threads in (None, 1, 8):
+                with self.subTest(threads=threads):
+                    argv = arguments + ([] if threads is None else ["--threads", str(threads)])
+                    with patch("sys.argv", argv), patch(
+                        "benchmark_reads.subprocess.check_output", side_effect=["fixture-commit", ""]
+                    ), patch("benchmark_reads.subprocess.run", return_value=result) as run, contextlib.redirect_stdout(
+                        io.StringIO()
+                    ):
+                        main()
+                    expected = 2 if threads is None else threads
+                    self.assertIn(f"SET threads={expected};", run.call_args.kwargs["input"])
+                    self.assertEqual(json.loads(output.read_text())["threads"], expected)
+                    output.unlink()
+            failed = SimpleNamespace(
+                returncode=1,
+                stdout="BENCH_QUERY_0\n",
+                stderr="OneLake read stream returned HTTP 429; sensitive service body",
+            )
+            with patch("sys.argv", arguments + ["--threads", "8"]), patch(
+                "benchmark_reads.subprocess.check_output", side_effect=["fixture-commit", ""]
+            ), patch("benchmark_reads.subprocess.run", return_value=failed), contextlib.redirect_stdout(
+                io.StringIO()
+            ), self.assertRaises(
+                RuntimeError
+            ):
+                main()
+            failure = json.loads(output.read_text())
+            self.assertFalse(failure["equivalent"])
+            self.assertEqual(failure["failure"]["reason"], "http_429")
+            self.assertEqual(failure["failure"]["query_markers"], 1)
+            self.assertNotIn("sensitive", output.read_text())
+            output.unlink()
+            for threads in (0, -1):
+                with self.subTest(threads=threads), patch("sys.argv", arguments + ["--threads", str(threads)]), patch(
+                    "benchmark_reads.subprocess.run"
+                ) as run, contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    main()
+                run.assert_not_called()
+
     def test_peak_stream_metric_is_a_high_water_snapshot(self):
         self.assertEqual(
             difference(

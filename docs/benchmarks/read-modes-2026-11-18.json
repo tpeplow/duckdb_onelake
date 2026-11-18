@@ -1,0 +1,1729 @@
+{
+  "benchmark": "Direct Parquet versus Table API at one, two and eight DuckDB threads",
+  "date": "2026-11-18",
+  "reader_source_commit": "f93d9d65e33802cb7844d4573bef60615ca90512",
+  "shell_sha256": "7f020e3e4720729fe95276ecb051868e4ee8d339fade06bfa6843622c05494fc",
+  "binary_note": "All configurations used the same shell, built from the parallel-reader changes before their commit.",
+  "dataset": {
+    "name": "PricePaid",
+    "rows": 30535540
+  },
+  "settings": {
+    "memory_limit": "4GB",
+    "external_file_cache": false,
+    "table_api_read_cache": "OFF (default)",
+    "read_metrics": true,
+    "prepared": false,
+    "profile": false,
+    "executions_per_workload_configuration": 3,
+    "summary": "Median of executions 1 and 2, excluding first-use execution 0"
+  },
+  "configurations": {
+    "direct": {
+      "read_mode": "DIRECT_FILES",
+      "duckdb_threads": 2
+    },
+    "table_1": {
+      "read_mode": "TABLE_API",
+      "duckdb_threads": 1
+    },
+    "table_2": {
+      "read_mode": "TABLE_API",
+      "duckdb_threads": 2
+    },
+    "table_8": {
+      "read_mode": "TABLE_API",
+      "duckdb_threads": 8
+    }
+  },
+  "method": [
+    "Fresh native DuckDB process per mode/workload, with three queries in that process.",
+    "Direct-files and Table API two-thread data reused from the immediately preceding comparison.",
+    "One-thread and eight-thread Table API measurements were collected afterwards, not interleaved by thread count.",
+    "SQL wall time includes binding and execution; token acquisition is outside the SQL timing.",
+    "No OS or service cache flush, and no common source snapshot guarantee.",
+    "All reported aggregate results matched across modes, repetitions and thread counts.",
+    "COUNT and counted LIMIT can avoid reading the named Price column; these are not forced Price-value scans.",
+    "Stream counters instrument Table API only; they do not measure direct-file HTTP traffic.",
+    "Duration counters ending in _ns are elapsed times, not client process CPU.",
+    "Peak-active streams is a connection high-water snapshot, not an additive per-query counter.",
+    "Every successful Table API query returned one stream. The reader used its serial fast path at all thread settings."
+  ],
+  "source_reports": {
+    "two_threads": {
+      "filename": "read-mode-parallel-cache-disabled-20261118.json",
+      "sha256": "11a3646c781e42096945b5c0f363fbec88331d13f9a7234f4f45c3defd3952b4",
+      "started_at_utc": "2026-11-18T21:18:15.080416+00:00",
+      "source_commit": "f93d9d65e33802cb7844d4573bef60615ca90512",
+      "runner_worktree_dirty": false,
+      "report_completed": true
+    },
+    "one_thread": {
+      "filename": "read-mode-table-1-threads-20261118.json",
+      "sha256": "9bc12915cfafbc7fa7573378a53db475c852b54f600d77041e498f45dfe9336a",
+      "started_at_utc": "2026-11-18T21:30:11.025434+00:00",
+      "source_commit": "f93d9d65e33802cb7844d4573bef60615ca90512",
+      "runner_worktree_dirty": true,
+      "report_completed": true
+    },
+    "eight_threads_initial": {
+      "filename": "read-mode-table-8-threads-20261118.json",
+      "sha256": "c5f3292585f4b8aef1f414cc535225ac1b660bd348744db605a3055d8aba50a4",
+      "started_at_utc": "2026-11-18T21:32:37.281424+00:00",
+      "source_commit": "f93d9d65e33802cb7844d4573bef60615ca90512",
+      "runner_worktree_dirty": true,
+      "report_completed": false
+    },
+    "eight_threads_aggregate": {
+      "filename": "read-mode-table-8-threads-aggregate-20261118.json",
+      "sha256": "8458ceb4f09a57860b5ba280c212607fc9c85ae2a34d10ec0a8f9b51bcae4431",
+      "started_at_utc": "2026-11-18T21:37:51.858618+00:00",
+      "source_commit": "f93d9d65e33802cb7844d4573bef60615ca90512",
+      "runner_worktree_dirty": true,
+      "report_completed": true
+    },
+    "eight_threads_filter": {
+      "filename": "read-mode-table-8-threads-filter-20261118.json",
+      "sha256": "564acacf5e34a58cf0fdced5ce75bb8bae1e2ad85e4d94cc7e92491a097c4cf3",
+      "started_at_utc": "2026-11-18T21:38:32.838731+00:00",
+      "source_commit": "f93d9d65e33802cb7844d4573bef60615ca90512",
+      "runner_worktree_dirty": true,
+      "report_completed": true
+    },
+    "eight_threads_impossible": {
+      "filename": "read-mode-table-8-threads-impossible-20261118.json",
+      "sha256": "5ddb0c6a56957b53d194ca3762a49a686f871a1b811dc5f16bcf74870bc20edb",
+      "started_at_utc": "2026-11-18T21:39:11.584581+00:00",
+      "source_commit": "f93d9d65e33802cb7844d4573bef60615ca90512",
+      "runner_worktree_dirty": true,
+      "report_completed": true
+    }
+  },
+  "excluded_attempts": [
+    {
+      "configuration": "table_8",
+      "workload": "aggregate",
+      "source_report": "eight_threads_initial",
+      "exit_code": 1,
+      "reason": "Child process failure; the runner at that point did not retain a sanitized reason or partial timings.",
+      "timings_retained": false,
+      "actual_read_allocations": null,
+      "maximum_queries_configured_in_failed_process": 3,
+      "handling": "Preserved as a failed attempt. Aggregate was rerun once separately with fresh credentials; filter and no-match cases then ran separately. The cause was not established."
+    }
+  ],
+  "results": [
+    {
+      "workload": "sample",
+      "measurements": {
+        "direct": {
+          "source_report": "two_threads",
+          "process_seconds_including_setup_and_metrics": 45.73463910000282,
+          "first_query_seconds": 29.275,
+          "repeat_median_seconds": 8.193,
+          "runs": [
+            {
+              "iteration": 0,
+              "seconds": 29.275,
+              "result": [
+                {
+                  "n": 10
+                }
+              ]
+            },
+            {
+              "iteration": 1,
+              "seconds": 10.161,
+              "result": [
+                {
+                  "n": 10
+                }
+              ]
+            },
+            {
+              "iteration": 2,
+              "seconds": 6.225,
+              "result": [
+                {
+                  "n": 10
+                }
+              ]
+            }
+          ]
+        },
+        "table_1": {
+          "source_report": "one_thread",
+          "process_seconds_including_setup_and_metrics": 13.025953400006983,
+          "first_query_seconds": 6.388,
+          "repeat_median_seconds": 3.2750000000000004,
+          "runs": [
+            {
+              "iteration": 0,
+              "seconds": 6.388,
+              "result": [
+                {
+                  "n": 10
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 317248,
+                "rows": 2535540,
+                "batches": 1,
+                "first_batch_ns": 2967051100,
+                "allocation_ns": 1060332100,
+                "stream_open_ns": 163945200,
+                "stream_read_ns": 1741747300,
+                "ipc_processing_ns": 651100,
+                "completions": 0,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            },
+            {
+              "iteration": 1,
+              "seconds": 3.148,
+              "result": [
+                {
+                  "n": 10
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 317248,
+                "rows": 2535540,
+                "batches": 1,
+                "first_batch_ns": 2833306900,
+                "allocation_ns": 1098391600,
+                "stream_open_ns": 138517600,
+                "stream_read_ns": 1595828700,
+                "ipc_processing_ns": 430000,
+                "completions": 0,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            },
+            {
+              "iteration": 2,
+              "seconds": 3.402,
+              "result": [
+                {
+                  "n": 10
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 317248,
+                "rows": 2535540,
+                "batches": 1,
+                "first_batch_ns": 3040987300,
+                "allocation_ns": 1139681800,
+                "stream_open_ns": 133131600,
+                "stream_read_ns": 1767637900,
+                "ipc_processing_ns": 373000,
+                "completions": 0,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            }
+          ]
+        },
+        "table_2": {
+          "source_report": "two_threads",
+          "process_seconds_including_setup_and_metrics": 14.117422200011788,
+          "first_query_seconds": 7.163,
+          "repeat_median_seconds": 3.444,
+          "runs": [
+            {
+              "iteration": 0,
+              "seconds": 7.163,
+              "result": [
+                {
+                  "n": 10
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 317248,
+                "rows": 2535540,
+                "batches": 1,
+                "first_batch_ns": 5405839300,
+                "allocation_ns": 2981085200,
+                "stream_open_ns": 182855100,
+                "stream_read_ns": 2240849800,
+                "ipc_processing_ns": 677100,
+                "completions": 0,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            },
+            {
+              "iteration": 1,
+              "seconds": 3.198,
+              "result": [
+                {
+                  "n": 10
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 317248,
+                "rows": 2535540,
+                "batches": 1,
+                "first_batch_ns": 2887918200,
+                "allocation_ns": 986770800,
+                "stream_open_ns": 147562800,
+                "stream_read_ns": 1753040500,
+                "ipc_processing_ns": 381600,
+                "completions": 0,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            },
+            {
+              "iteration": 2,
+              "seconds": 3.69,
+              "result": [
+                {
+                  "n": 10
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 317248,
+                "rows": 2535540,
+                "batches": 1,
+                "first_batch_ns": 3473169300,
+                "allocation_ns": 1488396000,
+                "stream_open_ns": 149326900,
+                "stream_read_ns": 1834783200,
+                "ipc_processing_ns": 485100,
+                "completions": 0,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            }
+          ]
+        },
+        "table_8": {
+          "source_report": "eight_threads_initial",
+          "process_seconds_including_setup_and_metrics": 10.345286800002214,
+          "first_query_seconds": 4.242,
+          "repeat_median_seconds": 3.0185,
+          "runs": [
+            {
+              "iteration": 0,
+              "seconds": 4.242,
+              "result": [
+                {
+                  "n": 10
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 317248,
+                "rows": 2535540,
+                "batches": 1,
+                "first_batch_ns": 1997707800,
+                "allocation_ns": 410855000,
+                "stream_open_ns": 41183700,
+                "stream_read_ns": 1544358400,
+                "ipc_processing_ns": 708800,
+                "completions": 0,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            },
+            {
+              "iteration": 1,
+              "seconds": 3.3,
+              "result": [
+                {
+                  "n": 10
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 317248,
+                "rows": 2535540,
+                "batches": 1,
+                "first_batch_ns": 3118772300,
+                "allocation_ns": 1161035100,
+                "stream_open_ns": 210484500,
+                "stream_read_ns": 1746750500,
+                "ipc_processing_ns": 324100,
+                "completions": 0,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            },
+            {
+              "iteration": 2,
+              "seconds": 2.737,
+              "result": [
+                {
+                  "n": 10
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 317248,
+                "rows": 2535540,
+                "batches": 1,
+                "first_batch_ns": 2563586200,
+                "allocation_ns": 940224100,
+                "stream_open_ns": 176366400,
+                "stream_read_ns": 1446092300,
+                "ipc_processing_ns": 709300,
+                "completions": 0,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            }
+          ]
+        }
+      },
+      "sql": "SELECT count(*) AS n FROM (SELECT \"Price\" FROM lake.\"HousePrices\".\"PricePaid\" LIMIT 10)"
+    },
+    {
+      "workload": "count",
+      "measurements": {
+        "direct": {
+          "source_report": "two_threads",
+          "process_seconds_including_setup_and_metrics": 40.42152019997593,
+          "first_query_seconds": 30.566,
+          "repeat_median_seconds": 4.8975,
+          "runs": [
+            {
+              "iteration": 0,
+              "seconds": 30.566,
+              "result": [
+                {
+                  "n": 30535540
+                }
+              ]
+            },
+            {
+              "iteration": 1,
+              "seconds": 4.922,
+              "result": [
+                {
+                  "n": 30535540
+                }
+              ]
+            },
+            {
+              "iteration": 2,
+              "seconds": 4.873,
+              "result": [
+                {
+                  "n": 30535540
+                }
+              ]
+            }
+          ]
+        },
+        "table_1": {
+          "source_report": "one_thread",
+          "process_seconds_including_setup_and_metrics": 25.81025830001454,
+          "first_query_seconds": 9.144,
+          "repeat_median_seconds": 8.2975,
+          "runs": [
+            {
+              "iteration": 0,
+              "seconds": 9.144,
+              "result": [
+                {
+                  "n": 30535540
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 3819944,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 3044966400,
+                "allocation_ns": 881761900,
+                "stream_open_ns": 130466400,
+                "stream_read_ns": 6280292900,
+                "ipc_processing_ns": 3653400,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            },
+            {
+              "iteration": 1,
+              "seconds": 8.07,
+              "result": [
+                {
+                  "n": 30535540
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 3819944,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 2816209200,
+                "allocation_ns": 996210400,
+                "stream_open_ns": 133010100,
+                "stream_read_ns": 6503153500,
+                "ipc_processing_ns": 3685700,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            },
+            {
+              "iteration": 2,
+              "seconds": 8.525,
+              "result": [
+                {
+                  "n": 30535540
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 3819944,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 2954714500,
+                "allocation_ns": 926898100,
+                "stream_open_ns": 133339500,
+                "stream_read_ns": 7216132500,
+                "ipc_processing_ns": 5993500,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            }
+          ]
+        },
+        "table_2": {
+          "source_report": "two_threads",
+          "process_seconds_including_setup_and_metrics": 25.971161599998595,
+          "first_query_seconds": 9.993,
+          "repeat_median_seconds": 7.464499999999999,
+          "runs": [
+            {
+              "iteration": 0,
+              "seconds": 9.993,
+              "result": [
+                {
+                  "n": 30535540
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 3819944,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 2875264400,
+                "allocation_ns": 952952200,
+                "stream_open_ns": 238297000,
+                "stream_read_ns": 6286871300,
+                "ipc_processing_ns": 2703200,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            },
+            {
+              "iteration": 1,
+              "seconds": 7.52,
+              "result": [
+                {
+                  "n": 30535540
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 3819944,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 2959253800,
+                "allocation_ns": 1078225700,
+                "stream_open_ns": 174433700,
+                "stream_read_ns": 5910868200,
+                "ipc_processing_ns": 2973200,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            },
+            {
+              "iteration": 2,
+              "seconds": 7.409,
+              "result": [
+                {
+                  "n": 30535540
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 3819944,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 2551503300,
+                "allocation_ns": 979958000,
+                "stream_open_ns": 149711300,
+                "stream_read_ns": 5918777700,
+                "ipc_processing_ns": 5168200,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            }
+          ]
+        },
+        "table_8": {
+          "source_report": "eight_threads_initial",
+          "process_seconds_including_setup_and_metrics": 26.3351651999983,
+          "first_query_seconds": 10.715,
+          "repeat_median_seconds": 7.7735,
+          "runs": [
+            {
+              "iteration": 0,
+              "seconds": 10.715,
+              "result": [
+                {
+                  "n": 30535540
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 3819944,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 2752653200,
+                "allocation_ns": 992312000,
+                "stream_open_ns": 164668800,
+                "stream_read_ns": 7057201100,
+                "ipc_processing_ns": 5098700,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            },
+            {
+              "iteration": 1,
+              "seconds": 7.866,
+              "result": [
+                {
+                  "n": 30535540
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 3819944,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 2630192700,
+                "allocation_ns": 849255800,
+                "stream_open_ns": 166960100,
+                "stream_read_ns": 6669510000,
+                "ipc_processing_ns": 2062800,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            },
+            {
+              "iteration": 2,
+              "seconds": 7.681,
+              "result": [
+                {
+                  "n": 30535540
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 3819944,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 2979255000,
+                "allocation_ns": 1132915800,
+                "stream_open_ns": 170961800,
+                "stream_read_ns": 6056264100,
+                "ipc_processing_ns": 4357200,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            }
+          ]
+        }
+      },
+      "sql": "SELECT count(*) AS n FROM lake.\"HousePrices\".\"PricePaid\""
+    },
+    {
+      "workload": "aggregate",
+      "measurements": {
+        "direct": {
+          "source_report": "two_threads",
+          "process_seconds_including_setup_and_metrics": 45.902126499975566,
+          "first_query_seconds": 28.02,
+          "repeat_median_seconds": 8.91,
+          "runs": [
+            {
+              "iteration": 0,
+              "seconds": 28.02,
+              "result": [
+                {
+                  "n": 30535540,
+                  "nonnull": 30535540,
+                  "minimum": 1.0,
+                  "maximum": 900000000.0,
+                  "total": 7084736086335.0
+                }
+              ]
+            },
+            {
+              "iteration": 1,
+              "seconds": 8.773,
+              "result": [
+                {
+                  "n": 30535540,
+                  "nonnull": 30535540,
+                  "minimum": 1.0,
+                  "maximum": 900000000.0,
+                  "total": 7084736086335.0
+                }
+              ]
+            },
+            {
+              "iteration": 2,
+              "seconds": 9.047,
+              "result": [
+                {
+                  "n": 30535540,
+                  "nonnull": 30535540,
+                  "minimum": 1.0,
+                  "maximum": 900000000.0,
+                  "total": 7084736086335.0
+                }
+              ]
+            }
+          ]
+        },
+        "table_1": {
+          "source_report": "one_thread",
+          "process_seconds_including_setup_and_metrics": 34.13917310000397,
+          "first_query_seconds": 12.78,
+          "repeat_median_seconds": 10.6465,
+          "runs": [
+            {
+              "iteration": 0,
+              "seconds": 12.78,
+              "result": [
+                {
+                  "n": 30535540,
+                  "nonnull": 30535540,
+                  "minimum": 1.0,
+                  "maximum": 900000000.0,
+                  "total": 7084736086335.0
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 244286640,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 2980005300,
+                "allocation_ns": 738167700,
+                "stream_open_ns": 755516300,
+                "stream_read_ns": 8581136500,
+                "ipc_processing_ns": 135241300,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            },
+            {
+              "iteration": 1,
+              "seconds": 10.781,
+              "result": [
+                {
+                  "n": 30535540,
+                  "nonnull": 30535540,
+                  "minimum": 1.0,
+                  "maximum": 900000000.0,
+                  "total": 7084736086335.0
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 244286640,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 2940352800,
+                "allocation_ns": 958760200,
+                "stream_open_ns": 154091700,
+                "stream_read_ns": 8917301900,
+                "ipc_processing_ns": 135589500,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            },
+            {
+              "iteration": 2,
+              "seconds": 10.512,
+              "result": [
+                {
+                  "n": 30535540,
+                  "nonnull": 30535540,
+                  "minimum": 1.0,
+                  "maximum": 900000000.0,
+                  "total": 7084736086335.0
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 244286640,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 3173655200,
+                "allocation_ns": 1058542700,
+                "stream_open_ns": 204966900,
+                "stream_read_ns": 8574939100,
+                "ipc_processing_ns": 138123200,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            }
+          ]
+        },
+        "table_2": {
+          "source_report": "two_threads",
+          "process_seconds_including_setup_and_metrics": 38.046039399981964,
+          "first_query_seconds": 13.977,
+          "repeat_median_seconds": 12.0055,
+          "runs": [
+            {
+              "iteration": 0,
+              "seconds": 13.977,
+              "result": [
+                {
+                  "n": 30535540,
+                  "nonnull": 30535540,
+                  "minimum": 1.0,
+                  "maximum": 900000000.0,
+                  "total": 7084736086335.0
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 244286640,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 3254567200,
+                "allocation_ns": 981626300,
+                "stream_open_ns": 92107500,
+                "stream_read_ns": 9737099400,
+                "ipc_processing_ns": 157536200,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            },
+            {
+              "iteration": 1,
+              "seconds": 11.725,
+              "result": [
+                {
+                  "n": 30535540,
+                  "nonnull": 30535540,
+                  "minimum": 1.0,
+                  "maximum": 900000000.0,
+                  "total": 7084736086335.0
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 244286640,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 3702636400,
+                "allocation_ns": 1183336600,
+                "stream_open_ns": 204575400,
+                "stream_read_ns": 9658802500,
+                "ipc_processing_ns": 142687000,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            },
+            {
+              "iteration": 2,
+              "seconds": 12.286,
+              "result": [
+                {
+                  "n": 30535540,
+                  "nonnull": 30535540,
+                  "minimum": 1.0,
+                  "maximum": 900000000.0,
+                  "total": 7084736086335.0
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 244286640,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 3540887500,
+                "allocation_ns": 1109434000,
+                "stream_open_ns": 204880100,
+                "stream_read_ns": 10315813500,
+                "ipc_processing_ns": 138006600,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            }
+          ]
+        },
+        "table_8": {
+          "source_report": "eight_threads_aggregate",
+          "process_seconds_including_setup_and_metrics": 36.975651000015205,
+          "first_query_seconds": 13.152,
+          "repeat_median_seconds": 11.5225,
+          "runs": [
+            {
+              "iteration": 0,
+              "seconds": 13.152,
+              "result": [
+                {
+                  "n": 30535540,
+                  "nonnull": 30535540,
+                  "minimum": 1.0,
+                  "maximum": 900000000.0,
+                  "total": 7084736086335.0
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 244286640,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 3073600300,
+                "allocation_ns": 969174100,
+                "stream_open_ns": 35442000,
+                "stream_read_ns": 9492092700,
+                "ipc_processing_ns": 171657000,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            },
+            {
+              "iteration": 1,
+              "seconds": 9.922,
+              "result": [
+                {
+                  "n": 30535540,
+                  "nonnull": 30535540,
+                  "minimum": 1.0,
+                  "maximum": 900000000.0,
+                  "total": 7084736086335.0
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 244286640,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 3122203900,
+                "allocation_ns": 922628000,
+                "stream_open_ns": 128807500,
+                "stream_read_ns": 8152857000,
+                "ipc_processing_ns": 132973400,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            },
+            {
+              "iteration": 2,
+              "seconds": 13.123,
+              "result": [
+                {
+                  "n": 30535540,
+                  "nonnull": 30535540,
+                  "minimum": 1.0,
+                  "maximum": 900000000.0,
+                  "total": 7084736086335.0
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 244286640,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 5104050800,
+                "allocation_ns": 2877398100,
+                "stream_open_ns": 196786300,
+                "stream_read_ns": 9345416400,
+                "ipc_processing_ns": 128622100,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            }
+          ]
+        }
+      },
+      "sql": "SELECT count(*) AS n, count(\"Price\") AS nonnull, min(\"Price\") AS minimum, max(\"Price\") AS maximum, sum(\"Price\") AS total FROM lake.\"HousePrices\".\"PricePaid\""
+    },
+    {
+      "workload": "filter",
+      "measurements": {
+        "direct": {
+          "source_report": "two_threads",
+          "process_seconds_including_setup_and_metrics": 44.027076500002295,
+          "first_query_seconds": 25.94,
+          "repeat_median_seconds": 9.013,
+          "runs": [
+            {
+              "iteration": 0,
+              "seconds": 25.94,
+              "result": [
+                {
+                  "n": 13402,
+                  "total": 372054774050.0
+                }
+              ]
+            },
+            {
+              "iteration": 1,
+              "seconds": 8.589,
+              "result": [
+                {
+                  "n": 13402,
+                  "total": 372054774050.0
+                }
+              ]
+            },
+            {
+              "iteration": 2,
+              "seconds": 9.437,
+              "result": [
+                {
+                  "n": 13402,
+                  "total": 372054774050.0
+                }
+              ]
+            }
+          ]
+        },
+        "table_1": {
+          "source_report": "one_thread",
+          "process_seconds_including_setup_and_metrics": 35.938854799984256,
+          "first_query_seconds": 11.879,
+          "repeat_median_seconds": 11.992999999999999,
+          "runs": [
+            {
+              "iteration": 0,
+              "seconds": 11.879,
+              "result": [
+                {
+                  "n": 13402,
+                  "total": 372054774050.0
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 244286640,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 3741277800,
+                "allocation_ns": 1470528400,
+                "stream_open_ns": 132459600,
+                "stream_read_ns": 8425861200,
+                "ipc_processing_ns": 124957100,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            },
+            {
+              "iteration": 1,
+              "seconds": 11.664,
+              "result": [
+                {
+                  "n": 13402,
+                  "total": 372054774050.0
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 244286640,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 3340008400,
+                "allocation_ns": 1117793900,
+                "stream_open_ns": 174217100,
+                "stream_read_ns": 9877285800,
+                "ipc_processing_ns": 133904000,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            },
+            {
+              "iteration": 2,
+              "seconds": 12.322,
+              "result": [
+                {
+                  "n": 13402,
+                  "total": 372054774050.0
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 244286640,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 4024998900,
+                "allocation_ns": 1880033000,
+                "stream_open_ns": 139792100,
+                "stream_read_ns": 9794893900,
+                "ipc_processing_ns": 130531300,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            }
+          ]
+        },
+        "table_2": {
+          "source_report": "two_threads",
+          "process_seconds_including_setup_and_metrics": 40.73906730001909,
+          "first_query_seconds": 15.846,
+          "repeat_median_seconds": 12.416,
+          "runs": [
+            {
+              "iteration": 0,
+              "seconds": 15.846,
+              "result": [
+                {
+                  "n": 13402,
+                  "total": 372054774050.0
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 244286640,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 4643209400,
+                "allocation_ns": 1971193600,
+                "stream_open_ns": 152656600,
+                "stream_read_ns": 10459318300,
+                "ipc_processing_ns": 135186200,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            },
+            {
+              "iteration": 1,
+              "seconds": 12.475,
+              "result": [
+                {
+                  "n": 13402,
+                  "total": 372054774050.0
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 244286640,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 3955482500,
+                "allocation_ns": 1318173000,
+                "stream_open_ns": 180974900,
+                "stream_read_ns": 10232652800,
+                "ipc_processing_ns": 121309100,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            },
+            {
+              "iteration": 2,
+              "seconds": 12.357,
+              "result": [
+                {
+                  "n": 13402,
+                  "total": 372054774050.0
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 244286640,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 3420074400,
+                "allocation_ns": 1116690800,
+                "stream_open_ns": 151976600,
+                "stream_read_ns": 10489314400,
+                "ipc_processing_ns": 142169300,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            }
+          ]
+        },
+        "table_8": {
+          "source_report": "eight_threads_filter",
+          "process_seconds_including_setup_and_metrics": 34.53274450000026,
+          "first_query_seconds": 11.397,
+          "repeat_median_seconds": 11.528,
+          "runs": [
+            {
+              "iteration": 0,
+              "seconds": 11.397,
+              "result": [
+                {
+                  "n": 13402,
+                  "total": 372054774050.0
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 244286640,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 3163982300,
+                "allocation_ns": 955872800,
+                "stream_open_ns": 140234500,
+                "stream_read_ns": 8540553500,
+                "ipc_processing_ns": 128146200,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            },
+            {
+              "iteration": 1,
+              "seconds": 11.582,
+              "result": [
+                {
+                  "n": 13402,
+                  "total": 372054774050.0
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 244286640,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 3558145700,
+                "allocation_ns": 1225620900,
+                "stream_open_ns": 192451000,
+                "stream_read_ns": 9546502500,
+                "ipc_processing_ns": 125455500,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            },
+            {
+              "iteration": 2,
+              "seconds": 11.474,
+              "result": [
+                {
+                  "n": 13402,
+                  "total": 372054774050.0
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 244286640,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 3623801700,
+                "allocation_ns": 1048880300,
+                "stream_open_ns": 171557400,
+                "stream_read_ns": 9642212700,
+                "ipc_processing_ns": 127952000,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            }
+          ]
+        }
+      },
+      "sql": "SELECT count(*) AS n, sum(\"Price\") AS total FROM lake.\"HousePrices\".\"PricePaid\" WHERE \"Price\" >= 10000000"
+    },
+    {
+      "workload": "impossible",
+      "measurements": {
+        "direct": {
+          "source_report": "two_threads",
+          "process_seconds_including_setup_and_metrics": 32.42063030001009,
+          "first_query_seconds": 17.639,
+          "repeat_median_seconds": 7.3605,
+          "runs": [
+            {
+              "iteration": 0,
+              "seconds": 17.639,
+              "result": [
+                {
+                  "n": 0
+                }
+              ]
+            },
+            {
+              "iteration": 1,
+              "seconds": 3.5,
+              "result": [
+                {
+                  "n": 0
+                }
+              ]
+            },
+            {
+              "iteration": 2,
+              "seconds": 11.221,
+              "result": [
+                {
+                  "n": 0
+                }
+              ]
+            }
+          ]
+        },
+        "table_1": {
+          "source_report": "one_thread",
+          "process_seconds_including_setup_and_metrics": 36.69549610000104,
+          "first_query_seconds": 13.048,
+          "repeat_median_seconds": 11.7875,
+          "runs": [
+            {
+              "iteration": 0,
+              "seconds": 13.048,
+              "result": [
+                {
+                  "n": 0
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 244286640,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 2651463600,
+                "allocation_ns": 821235500,
+                "stream_open_ns": 131708000,
+                "stream_read_ns": 9057770500,
+                "ipc_processing_ns": 135344000,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            },
+            {
+              "iteration": 1,
+              "seconds": 10.552,
+              "result": [
+                {
+                  "n": 0
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 244286640,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 2919082800,
+                "allocation_ns": 921808900,
+                "stream_open_ns": 134805100,
+                "stream_read_ns": 8933085100,
+                "ipc_processing_ns": 161770800,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            },
+            {
+              "iteration": 2,
+              "seconds": 13.023,
+              "result": [
+                {
+                  "n": 0
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 244286640,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 3075773700,
+                "allocation_ns": 916241600,
+                "stream_open_ns": 129437800,
+                "stream_read_ns": 10706250600,
+                "ipc_processing_ns": 148542700,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            }
+          ]
+        },
+        "table_2": {
+          "source_report": "two_threads",
+          "process_seconds_including_setup_and_metrics": 57.622719600010896,
+          "first_query_seconds": 33.825,
+          "repeat_median_seconds": 11.8695,
+          "runs": [
+            {
+              "iteration": 0,
+              "seconds": 33.825,
+              "result": [
+                {
+                  "n": 0
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 244286640,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 23852777400,
+                "allocation_ns": 20699084900,
+                "stream_open_ns": 276090400,
+                "stream_read_ns": 10987372700,
+                "ipc_processing_ns": 129734100,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            },
+            {
+              "iteration": 1,
+              "seconds": 12.269,
+              "result": [
+                {
+                  "n": 0
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 244286640,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 3563238400,
+                "allocation_ns": 1370055400,
+                "stream_open_ns": 35485500,
+                "stream_read_ns": 9956374900,
+                "ipc_processing_ns": 129484700,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            },
+            {
+              "iteration": 2,
+              "seconds": 11.47,
+              "result": [
+                {
+                  "n": 0
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 244286640,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 3328920300,
+                "allocation_ns": 879715400,
+                "stream_open_ns": 133554600,
+                "stream_read_ns": 9861483100,
+                "ipc_processing_ns": 142967100,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            }
+          ]
+        },
+        "table_8": {
+          "source_report": "eight_threads_impossible",
+          "process_seconds_including_setup_and_metrics": 33.72964050000883,
+          "first_query_seconds": 12.676,
+          "repeat_median_seconds": 10.485,
+          "runs": [
+            {
+              "iteration": 0,
+              "seconds": 12.676,
+              "result": [
+                {
+                  "n": 0
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 244286640,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 2937005600,
+                "allocation_ns": 1013416800,
+                "stream_open_ns": 130084200,
+                "stream_read_ns": 9603522200,
+                "ipc_processing_ns": 126663500,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            },
+            {
+              "iteration": 1,
+              "seconds": 10.775,
+              "result": [
+                {
+                  "n": 0
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 244286640,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 2665523800,
+                "allocation_ns": 473522200,
+                "stream_open_ns": 37184100,
+                "stream_read_ns": 9589452200,
+                "ipc_processing_ns": 143526300,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            },
+            {
+              "iteration": 2,
+              "seconds": 10.195,
+              "result": [
+                {
+                  "n": 0
+                }
+              ],
+              "table_api_execution_metrics": {
+                "allocation_requests": 1,
+                "allocated_streams": 1,
+                "peak_active_streams": 1,
+                "stream_requests": 1,
+                "stream_bytes": 244286640,
+                "rows": 30535540,
+                "batches": 15,
+                "first_batch_ns": 2503999500,
+                "allocation_ns": 485189800,
+                "stream_open_ns": 36133600,
+                "stream_read_ns": 9153018600,
+                "ipc_processing_ns": 131556300,
+                "completions": 1,
+                "errors": 0
+              },
+              "schema_allocation_requests": 0,
+              "schema_stream_requests": 0
+            }
+          ]
+        }
+      },
+      "sql": "SELECT count(*) AS n FROM lake.\"HousePrices\".\"PricePaid\" WHERE \"Price\" > 1000000000"
+    }
+  ],
+  "validation": {
+    "successful_query_executions": 60,
+    "successful_table_api_query_executions": 45,
+    "successful_table_api_allocations": 45,
+    "schema_read_allocations": 0,
+    "allocated_streams_per_successful_execution": 1,
+    "peak_active_streams": 1,
+    "full_aggregate_results_equal": true,
+    "parallel_stream_execution_exercised": false,
+    "failed_process_count": 1,
+    "failed_process_read_allocations": null
+  }
+}
