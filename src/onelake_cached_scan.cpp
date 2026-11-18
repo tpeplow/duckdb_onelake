@@ -20,7 +20,6 @@
 #include "duckdb/parser/expression/function_expression.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 
-#include <cstring>
 #include <algorithm>
 
 namespace duckdb {
@@ -91,11 +90,11 @@ struct CacheState : ClientContextState {
 	}
 };
 
-struct BindData : ArrowScanFunctionData {
-	BindData(shared_ptr<OneLakeScanSource> source, bool enabled)
-	    : ArrowScanFunctionData(nullptr, 0), source(std::move(source)), enabled(enabled) {
+struct BindData : TableFunctionData {
+	BindData(shared_ptr<OneLakeScanSource> source, bool enabled) : source(std::move(source)), enabled(enabled) {
 	}
 	shared_ptr<OneLakeScanSource> source;
+	OneLakeTableSchema schema;
 	bool enabled;
 	optional_idx partial_limit;
 	TableFilterSet advisory_filters;
@@ -107,6 +106,7 @@ struct GlobalState : GlobalTableFunctionState {
 	}
 	TableFunction function;
 	unique_ptr<FunctionData> parquet_bind;
+	unique_ptr<ArrowScanFunctionData> arrow_bind;
 	optional_ptr<const FunctionData> child_bind;
 	unique_ptr<GlobalTableFunctionState> child;
 	vector<column_t> columns;
@@ -129,19 +129,6 @@ struct LocalState : LocalTableFunctionState {
 	unique_ptr<LocalTableFunctionState> child;
 	DataChunk parquet_output;
 };
-
-bool SameLayout(const ArrowSchema &a, const ArrowSchema &b) {
-	if (!a.format || !b.format || std::strcmp(a.format, b.format) || a.flags != b.flags ||
-	    a.n_children != b.n_children || bool(a.dictionary) != bool(b.dictionary)) {
-		return false;
-	}
-	for (int64_t i = 0; i < a.n_children; ++i) {
-		if (!SameLayout(*a.children[i], *b.children[i])) {
-			return false;
-		}
-	}
-	return !a.dictionary || SameLayout(*a.dictionary, *b.dictionary);
-}
 
 bool Enabled(ClientContext &context, const BindData &data) {
 	Value setting;
@@ -253,30 +240,34 @@ private:
 	ArrowTableSchema table;
 };
 
-idx_t CountColumn(const ArrowSchema &schema) {
+idx_t CountColumn(const OneLakeTableSchema &schema) {
 	idx_t selected = 0;
 	idx_t smallest = NumericLimits<idx_t>::Maximum();
-	for (int64_t i = 0; i < schema.n_children; ++i) {
-		const auto &column = *schema.children[i];
-		if (!column.format || column.dictionary || column.n_children || column.metadata) {
-			continue;
-		}
+	for (idx_t i = 0; i < schema.size(); ++i) {
+		const auto &column = schema[i];
 		idx_t bits;
-		const string format(column.format);
-		if (format == "b") {
+		switch (column.type.id()) {
+		case LogicalTypeId::BOOLEAN:
 			bits = 1;
-		} else if (format == "c" || format == "C") {
+			break;
+		case LogicalTypeId::TINYINT:
 			bits = 8;
-		} else if (format == "s" || format == "S" || format == "e") {
+			break;
+		case LogicalTypeId::SMALLINT:
 			bits = 16;
-		} else if (format == "i" || format == "I" || format == "f") {
+			break;
+		case LogicalTypeId::INTEGER:
+		case LogicalTypeId::FLOAT:
 			bits = 32;
-		} else if (format == "l" || format == "L" || format == "g") {
+			break;
+		case LogicalTypeId::BIGINT:
+		case LogicalTypeId::DOUBLE:
 			bits = 64;
-		} else {
+			break;
+		default:
 			continue;
 		}
-		bits += (column.flags & ARROW_FLAG_NULLABLE) ? 1 : 0;
+		bits += column.nullable.value_or(true) ? 1 : 0;
 		if (bits < smallest) {
 			selected = idx_t(i);
 			smallest = bits;
@@ -289,11 +280,11 @@ vector<string> Columns(const BindData &data, const vector<column_t> &ids) {
 	vector<string> names;
 	for (auto id : ids) {
 		if (id != COLUMN_IDENTIFIER_ROW_ID) {
-			names.emplace_back(data.schema_root.arrow_schema.children[id]->name);
+			names.emplace_back(data.schema[id].name);
 		}
 	}
 	if (names.empty()) {
-		names.emplace_back(data.schema_root.arrow_schema.children[data.count_column]->name);
+		names.emplace_back(data.schema[data.count_column].name);
 	}
 	return names;
 }
@@ -304,10 +295,20 @@ void StartArrow(ClientContext &context, const BindData &data, GlobalState &state
 	}
 	auto names = Columns(data, state.columns);
 	auto opened = data.source->Open(context, names);
-	ArrowSchemaWrapper actual;
-	opened.stream->GetSchema(actual);
-	ArrowTableSchema table;
-	ArrowTableFunction::PopulateArrowTableSchema(DBConfig::GetConfig(context), table, actual.arrow_schema);
+	auto execution_bind = make_uniq<ArrowScanFunctionData>(nullptr, 0);
+	opened.stream->GetSchema(execution_bind->schema_root);
+	const auto &actual = execution_bind->schema_root.arrow_schema;
+	if (actual.n_children != int64_t(names.size())) {
+		throw IOException("OneLake projected schema changed between binding and execution; rebind the query");
+	}
+	for (idx_t i = 0; i < names.size(); ++i) {
+		if (!actual.children[i]->name || names[i] != actual.children[i]->name) {
+			throw IOException("OneLake projected column name changed between binding and execution; rebind the query");
+		}
+	}
+	auto &table = execution_bind->arrow_table;
+	ArrowTableFunction::PopulateArrowTableSchema(DBConfig::GetConfig(context), table,
+	                                             execution_bind->schema_root.arrow_schema);
 	if (table.GetNames() != names) {
 		throw IOException("OneLake projected schema changed between binding and execution; rebind the query");
 	}
@@ -316,16 +317,15 @@ void StartArrow(ClientContext &context, const BindData &data, GlobalState &state
 		if (id == COLUMN_IDENTIFIER_ROW_ID) {
 			continue;
 		}
-		if (table.GetTypes()[projected] != data.all_types[id] ||
-		    !SameLayout(*data.schema_root.arrow_schema.children[id], *actual.arrow_schema.children[projected])) {
-			throw IOException("OneLake Arrow layout changed between binding and execution; rebind the query");
+		if (table.GetTypes()[projected] != data.schema[id].type) {
+			throw IOException("OneLake projected type changed between binding and execution; rebind the query");
 		}
 		++projected;
 	}
-	if (projected == 0 &&
-	    !SameLayout(*data.schema_root.arrow_schema.children[data.count_column], *actual.arrow_schema.children[0])) {
-		throw IOException("OneLake Arrow layout changed between binding and execution; rebind the query");
+	if (projected == 0 && table.GetTypes()[0] != data.schema[data.count_column].type) {
+		throw IOException("OneLake count carrier type changed between binding and execution; rebind the query");
 	}
+	execution_bind->all_types = table.GetTypes();
 	if (allow_fill && (opened.revalidate || opened.cache_expires_at) &&
 	    (!opened.cache_expires_at || data.source->CacheNow() < *opened.cache_expires_at) && Enabled(context, data)) {
 		try {
@@ -347,7 +347,8 @@ void StartArrow(ClientContext &context, const BindData &data, GlobalState &state
 	state.child.reset();
 	state.parquet_bind.reset();
 	state.filters.reset();
-	state.child_bind = &data;
+	state.arrow_bind = std::move(execution_bind);
+	state.child_bind = state.arrow_bind.get();
 	state.child = std::move(arrow);
 	state.entry.reset();
 }
@@ -386,12 +387,16 @@ void StartParquet(ClientContext &context, const BindData &data, GlobalState &sta
 		if (id == COLUMN_IDENTIFIER_ROW_ID) {
 			ids.push_back(COLUMN_IDENTIFIER_EMPTY);
 		} else {
-			if (types[position] != data.all_types[id]) {
+			if (types[position] != data.schema[id].type) {
 				throw IOException("OneLake cached type changed");
 			}
 			ids.push_back(position++);
 		}
 	}
+	if (position == 0 && types[0] != data.schema[data.count_column].type) {
+		throw IOException("OneLake cached count carrier type changed");
+	}
+	state.arrow_bind.reset();
 	state.child_bind = state.parquet_bind.get();
 	state.filters = make_uniq<TableFilterSet>();
 	for (idx_t i = 0; i < state.columns.size(); ++i) {
@@ -449,13 +454,12 @@ unique_ptr<GlobalTableFunctionState> Init(ClientContext &context, TableFunctionI
 }
 
 vector<column_t> ChildColumns(const GlobalState &state) {
-	if (!state.entry) {
-		return state.columns;
-	}
 	vector<column_t> result;
 	idx_t position = 0;
 	for (auto id : state.columns) {
-		result.push_back(id == COLUMN_IDENTIFIER_ROW_ID ? COLUMN_IDENTIFIER_EMPTY : position++);
+		result.push_back(id == COLUMN_IDENTIFIER_ROW_ID
+		                     ? (state.entry ? COLUMN_IDENTIFIER_EMPTY : COLUMN_IDENTIFIER_ROW_ID)
+		                     : position++);
 	}
 	return result;
 }
@@ -475,7 +479,7 @@ unique_ptr<LocalTableFunctionState> InitLocal(ExecutionContext &context, TableFu
 		}
 		state.cache->Erase(state.key, state.entry);
 		StartArrow(context.client, input.bind_data->Cast<BindData>(), state, false);
-		TableFunctionInitInput fallback(state.child_bind, state.columns, {}, nullptr);
+		TableFunctionInitInput fallback(state.child_bind, ChildColumns(state), {}, nullptr);
 		OneLakeReadTimer fallback_timer(state.metrics, ReadPhase::EXECUTION, ReadMetric::ARROW_OPERATOR_NS);
 		local->child = state.function.init_local(context, fallback, state.child.get());
 	}
@@ -528,7 +532,7 @@ void Scan(ClientContext &context, TableFunctionInput &input, DataChunk &output) 
 		auto &data = input.bind_data->Cast<BindData>();
 		StartArrow(context, data, state, false);
 		ExecutionContext execution(context, local.thread, local.pipeline);
-		TableFunctionInitInput init(state.child_bind, state.columns, {}, nullptr);
+		TableFunctionInitInput init(state.child_bind, ChildColumns(state), {}, nullptr);
 		OneLakeReadTimer fallback_timer(state.metrics, ReadPhase::EXECUTION, ReadMetric::ARROW_OPERATOR_NS);
 		local.child = state.function.init_local(execution, init, state.child.get());
 		output.Reset();
@@ -676,22 +680,19 @@ unique_ptr<FunctionData> BindOneLakeCachedScan(ClientContext &context, shared_pt
                                                bool enabled, vector<string> &names, vector<LogicalType> &types) {
 	source->Lifetime().CheckActive();
 	auto data = make_uniq<BindData>(std::move(source), enabled);
-	auto probe = data->source->Open(context, {});
-	probe.stream->GetSchema(data->schema_root);
-	ArrowTableFunction::PopulateArrowTableSchema(DBConfig::GetConfig(context), data->arrow_table,
-	                                             data->schema_root.arrow_schema);
-	names = data->arrow_table.GetNames();
-	types = data->arrow_table.GetTypes();
-	if (names.empty()) {
+	data->schema = data->source->GetSchema(context);
+	if (data->schema.empty()) {
 		throw IOException("OneLake returned no caller-visible columns");
 	}
-	for (idx_t i = 0; i < names.size(); ++i) {
-		if (names[i] != data->schema_root.arrow_schema.children[i]->name) {
+	case_insensitive_set_t seen;
+	for (const auto &column : data->schema) {
+		if (column.name.empty() || !seen.insert(column.name).second) {
 			throw IOException("OneLake returned ambiguous column names");
 		}
+		names.push_back(column.name);
+		types.push_back(column.type);
 	}
-	data->all_types = types;
-	data->count_column = CountColumn(data->schema_root.arrow_schema);
+	data->count_column = CountColumn(data->schema);
 	return std::move(data);
 }
 

@@ -2,6 +2,7 @@
 
 #include "duckdb/common/arrow/arrow_wrapper.hpp"
 #include "duckdb/function/table_function.hpp"
+#include "onelake_table_schema.hpp"
 #include <chrono>
 #include <optional>
 
@@ -36,6 +37,7 @@ public:
 	virtual string CacheKey() const = 0;
 	virtual OneLakeCacheLifetime &Lifetime() const = 0;
 	virtual void CheckIdentity(ClientContext &context) = 0;
+	virtual OneLakeTableSchema GetSchema(ClientContext &context) = 0;
 	virtual OneLakeOpenedRead Open(ClientContext &context, const vector<string> &columns) = 0;
 	virtual std::chrono::steady_clock::time_point CacheNow() const noexcept {
 		return std::chrono::steady_clock::now();

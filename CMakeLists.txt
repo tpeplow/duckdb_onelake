@@ -20,6 +20,7 @@ include_directories(src/include)
 option(ONELAKE_BUILD_CACHE_PROTOTYPE "Build the synthetic managed-cache storage test" OFF)
 if(ONELAKE_BUILD_CACHE_PROTOTYPE)
   add_executable(onelake_cache_storage_test test/cache/storage_test.cpp test/cache/scan_test.cpp test/cache/directory_test.cpp
+                 test/cache/schema_test.cpp
                  src/onelake_cache_storage.cpp src/onelake_cached_scan.cpp src/onelake_cache_directory.cpp)
   target_link_libraries(onelake_cache_storage_test duckdb_static)
   if(WIN32)
@@ -43,6 +44,7 @@ set(EXTENSION_SOURCES_COMMON
     src/onelake_extension.cpp
     src/onelake_api.cpp
     src/onelake_table_api.cpp
+    src/onelake_table_schema.cpp
     src/onelake_table_reader.cpp
     src/onelake_read_metrics.cpp
     src/onelake_cache_storage.cpp

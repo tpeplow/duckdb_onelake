@@ -90,15 +90,15 @@ existing counters. Metrics queries do not reset them or contact OneLake. No quer
 text, identities, tokens, URLs, stream IDs, headers or rows are included.
 
 The function returns `phase`, `metric`, and an unsigned integer `value`. Phases are
-`shared` (Table API token/metadata work), `schema` (schema-only reads), and
+`shared` (Table API token/metadata work), `schema` (metadata-only binding), and
 `execution` (projected reads and the native Arrow operator). All durations ending
 in `_ns` are wall-clock nanoseconds, **not CPU time**.
 
 | Metrics | Meaning |
 | --- | --- |
 | `token_calls`, `token_ns` | Token-provider and identity-validation calls, including cache hits; not token-service HTTP request counts. |
-| `metadata_requests`, `metadata_bytes`, `metadata_ns` | Table API discovery/catalog HTTP attempts, response bytes retained by the bounded receiver, and request/parse time. |
-| `bind_ns`, `reader_opens`, `reader_open_ns` | Arrow binding adapter time and native stream-construction attempts/time. Binding does not include all earlier catalog discovery. |
+| `metadata_requests`, `metadata_bytes`, `metadata_ns` | Table API discovery/catalog/Get table HTTP attempts, response bytes retained by the bounded receiver, and request time. |
+| `bind_ns`, `reader_opens`, `reader_open_ns` | Metadata binding adapter time and execution stream-construction attempts/time. Binding does not include all earlier catalog discovery. |
 | `allocation_requests`, `allocation_bytes`, `allocation_ns` | Rust POST attempts, consumed allocation-response bytes, and allocation/parse time. Attempts are not a billing ledger. |
 | `stream_requests`, `stream_open_ns` | Rust GET attempts and time until response headers are available. |
 | `stream_bytes`, `stream_read_ns` | Bytes returned by successful response-body reads and time spent in those reads. Includes IPC metadata/dictionaries, not just values. |
@@ -108,8 +108,13 @@ in `_ns` are wall-clock nanoseconds, **not CPU time**.
 | `completions`, `errors` | Readers reaching EOF and Rust open/iteration errors. Early LIMIT termination is not completion; native token/binding errors are not Rust errors. |
 | `arrow_fetch_ns`, `arrow_operator_ns`, `output_rows` | Native C-stream fetch time, inclusive Arrow local-init/scan time, and rows emitted by that operator before residual SQL filtering. Parquet cache hits are not counted as Arrow output. |
 
+Schema-phase reader, allocation and stream counters remain zero: binding uses
+Get table, counted in shared metadata metrics. PREPARE, DESCRIBE, ordinary EXPLAIN
+and optimized-away LIMIT 0 must not allocate reads. EXECUTE may still rebind and
+fetch metadata; no schema cache is introduced.
+
 Times overlap: reader-open includes allocation/initial-stream work; binding
-includes schema reader-open; first-batch spans include several stages.
+includes Get table work; first-batch spans include several stages.
 `arrow_operator_ns - arrow_fetch_ns` estimates remaining native conversion/scan
 overhead, not isolated conversion CPU. Do not sum all durations. Server execution,
 DNS/TLS, network buffering and scheduling are not independently observable.
@@ -131,10 +136,11 @@ The benchmark accepts `--read-metrics`, `--prepared`, `--profile`, `--cases` and
 It records setup/PREPARE metrics separately, per-execution deltas and optional
 DuckDB profiles. EXECUTE is not necessarily binding-free: the current unversioned
 OneLake catalog causes DuckDB to rebind prepared statements. Catalog lookup hands
-its freshly validated schema bind to the immediately following scan bind once,
-within the same statement. A simple table reference therefore needs one schema
-allocation, plus a separate execution allocation; inspect schema-phase counters
-for more complex statements. No schema bind is reused across statements.
+its freshly fetched metadata bind to the immediately following scan bind once,
+within the same statement. A simple uncached table scan therefore needs a
+metadata GET and one execution allocation, not an additional schema allocation.
+No schema bind is reused across statements. Unsupported metadata fails without
+falling back to a read stream.
 
 The count-only `sample` workload can optimize away the named column. The Arrow
 reader chooses a narrow, plain primitive from the authorized schema as its count
@@ -203,7 +209,7 @@ A low positive `READ_CACHE_TTL_SECONDS` reduces the local reuse window, but does
 not guarantee immediate revocation or bypass service-side propagation delays.
 
 The monotonic deadline starts immediately before opening the execution read.
-Allocation, transfer and encoding consume the TTL; hits and schema probes never
+Allocation, transfer and encoding consume the TTL; hits and metadata GETs never
 renew it. Before each hit, an expired entry is removed and a fresh Arrow read
 starts. A fill that expires stops retaining data and continues its original
 stream without replay. A cached query admitted before expiry may finish afterward.
@@ -339,7 +345,7 @@ comma-separated SQLLogicTest filter:
 It uses memory-only managed caching (`temp_directory=''`, `memory_limit='1GB'`),
 without creating spill directories. It checks OFF reads, a 300-second TTL
 projection fill/hit, missing-column misses, complete six-column fills/hits,
-prepared execution, zero execution-body bytes on hits, fresh schema allocations
+prepared execution, zero execution-body bytes on hits, zero schema allocations
 and removal of owned external-file-cache ranges on DETACH. Full results are
 compared as multisets with fresh authorized data, including duplicate/NULL/string
 values. Samples use simple unordered projections so partial reuse is eligible.

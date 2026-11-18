@@ -23,8 +23,30 @@ statement ok
 ATTACH '${ONELAKE_TEST_WORKSPACE}/${ONELAKE_TEST_ITEM}' AS live_read (TYPE ONELAKE, READ_MODE 'TABLE_API', READ_ONLY);
 
 statement ok
+SET onelake_enable_read_metrics=true;
+
+statement ok
+DESCRIBE SELECT * FROM live_read."${ONELAKE_TEST_SCHEMA}"."${ONELAKE_TEST_TABLE}";
+
+statement ok
+EXPLAIN SELECT * FROM live_read."${ONELAKE_TEST_SCHEMA}"."${ONELAKE_TEST_TABLE}";
+
+statement ok
+SELECT * FROM live_read."${ONELAKE_TEST_SCHEMA}"."${ONELAKE_TEST_TABLE}" LIMIT 0;
+
+statement ok
 PREPARE read_sample AS SELECT COUNT(*) FROM (SELECT Price FROM live_read."${ONELAKE_TEST_SCHEMA}"."${ONELAKE_TEST_TABLE}" LIMIT 10);
 
+query II
+SELECT sum(value) FILTER (WHERE metric IN ('allocation_requests','stream_requests')) = 0,
+       sum(value) FILTER (WHERE metric='metadata_requests') > 0
+FROM onelake_read_metrics();
+----
+true	true
+
+statement ok
+CREATE TEMP TABLE before_execute AS SELECT * FROM onelake_read_metrics();
+
 query I
 EXECUTE read_sample;
 ----
@@ -34,6 +56,16 @@ query I
 EXECUTE read_sample;
 ----
 10
+
+query III
+SELECT
+    (SELECT value FROM onelake_read_metrics() WHERE phase='execution' AND metric='allocation_requests')
+      - (SELECT value FROM before_execute WHERE phase='execution' AND metric='allocation_requests') = 2,
+    (SELECT sum(value) FROM onelake_read_metrics() WHERE phase='schema' AND metric IN ('allocation_requests','stream_requests')) = 0,
+    (SELECT value FROM onelake_read_metrics() WHERE phase='shared' AND metric='metadata_requests')
+      > (SELECT value FROM before_execute WHERE phase='shared' AND metric='metadata_requests');
+----
+true	true	true
 
 # No physical column is required by DuckDB here, but OneLake must still authorize the rows.
 query I

@@ -76,7 +76,7 @@ ${ONELAKE_TEST_COUNTRY}
 
 query II
 SELECT allocations - (SELECT allocations FROM before_case) = 2,
-       schemas - (SELECT schemas FROM before_case) = 2 FROM counters;
+       schemas - (SELECT schemas FROM before_case) = 0 FROM counters;
 ----
 true	true
 
@@ -113,7 +113,7 @@ ${ONELAKE_TEST_COUNTRY}
 query III
 SELECT allocations = (SELECT allocations FROM before_case),
        bytes = (SELECT bytes FROM before_case),
-       schemas - (SELECT schemas FROM before_case) = 1 FROM counters;
+       schemas - (SELECT schemas FROM before_case) = 0 FROM counters;
 ----
 true	true	true
 
@@ -145,7 +145,7 @@ true
 query III
 SELECT allocations = (SELECT allocations FROM before_case),
        bytes = (SELECT bytes FROM before_case),
-       schemas - (SELECT schemas FROM before_case) = 1 FROM counters;
+       schemas - (SELECT schemas FROM before_case) = 0 FROM counters;
 ----
 true	true	true
 
@@ -171,7 +171,7 @@ CREATE TEMP TABLE full_hit AS SELECT * FROM cached."${ONELAKE_TEST_SCHEMA}"."${O
 query III
 SELECT allocations = (SELECT allocations FROM before_case),
        bytes = (SELECT bytes FROM before_case),
-       schemas - (SELECT schemas FROM before_case) = 1 FROM counters;
+       schemas - (SELECT schemas FROM before_case) = 0 FROM counters;
 ----
 true	true	true
 
@@ -231,7 +231,7 @@ ${ONELAKE_TEST_COUNTRY}
 query III
 SELECT allocations = (SELECT allocations FROM before_case),
        bytes = (SELECT bytes FROM before_case),
-       schemas - (SELECT schemas FROM before_case) = 1 FROM counters;
+       schemas - (SELECT schemas FROM before_case) = 0 FROM counters;
 ----
 true	true	true
 
@@ -259,7 +259,7 @@ ${ONELAKE_TEST_COUNTRY}
 query III
 SELECT allocations = (SELECT allocations FROM before_case),
        bytes = (SELECT bytes FROM before_case),
-       schemas - (SELECT schemas FROM before_case) = 1 FROM counters;
+       schemas - (SELECT schemas FROM before_case) = 0 FROM counters;
 ----
 true	true	true
 

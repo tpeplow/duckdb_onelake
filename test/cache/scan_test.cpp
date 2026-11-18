@@ -37,6 +37,11 @@ struct Fixture {
 	vector<string> requested;
 	bool null_carrier = false;
 	bool drift = false;
+	bool nested_drift = false;
+	bool duplicate_names = false;
+	bool large_offsets = false;
+	string metadata;
+	vector<Value> values;
 	bool ttl_cache = false;
 	std::chrono::steady_clock::time_point now {std::chrono::seconds(100)};
 	std::chrono::seconds ttl {10};
@@ -49,6 +54,10 @@ public:
 	Stream(ClientContext &context, shared_ptr<Fixture> fixture, vector<string> names)
 	    : context(context), fixture(std::move(fixture)), names(std::move(names)),
 	      properties(context.GetClientProperties()) {
+		if (this->fixture->large_offsets) {
+			properties.arrow_offset_size = ArrowOffsetSize::LARGE;
+			properties.produce_arrow_string_view = false;
+		}
 		for (auto &name : this->names) {
 			auto found = std::find(this->fixture->names.begin(), this->fixture->names.end(), name);
 			types.push_back(this->fixture->types[found - this->fixture->names.begin()]);
@@ -58,6 +67,9 @@ public:
 		arrow_array_stream.get_schema = [](ArrowArrayStream *stream, ArrowSchema *out) {
 			auto &self = *static_cast<Stream *>(stream->private_data);
 			ArrowConverter::ToArrowSchema(out, self.types, self.names, self.properties);
+			if (self.fixture->duplicate_names && out->n_children > 1) {
+				out->children[1]->name = out->children[0]->name;
+			}
 			return 0;
 		};
 		arrow_array_stream.get_last_error = [](ArrowArrayStream *) {
@@ -85,7 +97,10 @@ public:
 		for (idx_t c = 0; c < names.size(); ++c) {
 			for (idx_t i = 0; i < chunk.size(); ++i) {
 				auto value = offset + i + fixture->version * 100000;
-				if (fixture->null_carrier && names[c] == "carrier") {
+				if (!fixture->values.empty()) {
+					auto found = std::find(fixture->names.begin(), fixture->names.end(), names[c]);
+					chunk.SetValue(c, i, fixture->values[found - fixture->names.begin()]);
+				} else if (fixture->null_carrier && names[c] == "carrier") {
 					chunk.SetValue(c, i, Value(types[c]));
 				} else if (types[c] == LogicalType::DOUBLE) {
 					FlatVector::GetData<double>(chunk.data[c])[i] = double(value);
@@ -132,24 +147,38 @@ public:
 	std::chrono::steady_clock::time_point CacheNow() const noexcept override {
 		return fixture->now;
 	}
+	OneLakeTableSchema GetSchema(ClientContext &context) override {
+		CheckIdentity(context);
+		++fixture->probes;
+		if (!fixture->metadata.empty()) {
+			return ParseOneLakeTableSchema(fixture->metadata);
+		}
+		OneLakeTableSchema schema;
+		for (idx_t i = 0; i < fixture->names.size(); ++i) {
+			schema.push_back({fixture->names[i], fixture->types[i], true, {}});
+		}
+		return schema;
+	}
 	OneLakeOpenedRead Open(ClientContext &context, const vector<string> &columns) override {
 		CheckIdentity(context);
+		if (columns.empty()) {
+			throw InternalException("Binding must not open a read");
+		}
 		auto started = CacheNow();
-		if (!columns.empty()) {
-			++fixture->opens;
-			fixture->requested = columns;
-			if (fixture->drift) {
-				fixture->types.back() = LogicalType::DOUBLE;
-			}
-		} else {
-			++fixture->probes;
+		++fixture->opens;
+		fixture->requested = columns;
+		if (fixture->drift) {
+			fixture->types.back() = LogicalType::DOUBLE;
+		}
+		if (fixture->nested_drift) {
+			fixture->types.back() = LogicalType::STRUCT({{"renamed", LogicalType::LIST(LogicalType::BIGINT)}});
 		}
 		OneLakeOpenedRead opened;
 		if (!columns.empty() && fixture->ttl_cache) {
 			opened.cache_expires_at = started + fixture->ttl;
 			fixture->now += fixture->open_time;
 		}
-		opened.stream = make_uniq<Stream>(context, fixture, columns.empty() ? fixture->names : columns);
+		opened.stream = make_uniq<Stream>(context, fixture, columns);
 		if (fixture->validation) {
 			auto version = fixture->version;
 			auto policy = fixture->policy;
@@ -366,6 +395,74 @@ void TestCountProjection(DuckDB &db) {
 	std::cout << "Narrow count projection, NULLs, filters, LIMIT, cache and schema drift passed\n";
 }
 
+void TestMetadataExecution(DuckDB &db) {
+	auto fixture = make_shared_ptr<Fixture>();
+	fixture->lifetime = make_shared_ptr<OneLakeCacheLifetime>(*db.instance);
+	fixture->names = {"id", "text", "nested"};
+	fixture->types = {LogicalType::INTEGER, LogicalType::VARCHAR,
+	                  LogicalType::STRUCT({{"items", LogicalType::LIST(LogicalType::BIGINT)}})};
+	fixture->values = {
+	    Value::INTEGER(42), Value("actual wire layout"),
+	    Value::STRUCT({{"items", Value::LIST(LogicalType::BIGINT, {Value::BIGINT(7), Value::BIGINT(9)})}})};
+	fixture->metadata = R"({"columns":[
+	    {"name":"id","position":0,"type_name":"int"},
+	    {"name":"text","position":1,"type_name":"string"},
+	    {"name":"nested","position":2,"type_name":"struct","type_text":"struct<items:array<long>>"}
+	]})";
+	fixture->rows = 3;
+	auto function = OneLakeCachedScanFunction();
+	function.name = "metadata_fixture";
+	function.bind = Bind;
+	auto info = make_shared_ptr<Info>(make_shared_ptr<Source>(fixture));
+	info->cache_enabled = false;
+	function.function_info = info;
+	ExtensionLoader loader(*db.instance, "metadata_execution_tests");
+	loader.RegisterFunction(std::move(function));
+	Connection connection(db);
+	Query(connection, "PREPARE metadata_layout AS SELECT nested.items[2], text, id FROM metadata_fixture()");
+	Check(fixture->opens == 0, "Preparing parsed metadata opened a read");
+	for (bool large : {false, true}) {
+		fixture->large_offsets = large;
+		auto result = Query(connection, "EXECUTE metadata_layout");
+		Check(result->RowCount() == 3 && result->GetValue(0, 0).GetValue<int64_t>() == 9 &&
+		          result->GetValue(1, 0).GetValue<string>() == "actual wire layout" &&
+		          result->GetValue(2, 0).GetValue<int32_t>() == 42,
+		      "Projected nested/string Arrow encoding was decoded using metadata layout");
+		Check(Scalar(connection, "SELECT sum(id)::BIGINT FROM metadata_fixture() WHERE text='actual wire layout'") ==
+		          126,
+		      "Subset/filter projection used original table IDs");
+	}
+	Vector dictionary(LogicalType::VARCHAR, 1);
+	dictionary.SetValue(0, Value("actual wire layout"));
+	auto enum_type = LogicalType::ENUM(dictionary, 1);
+	fixture->types[1] = enum_type;
+	fixture->values[1] = Value::ENUM(0, enum_type);
+	auto dictionary_result = Query(connection, "EXECUTE metadata_layout");
+	Check(dictionary_result->GetValue(1, 0).GetValue<string>() == "actual wire layout",
+	      "Dictionary-encoded string was decoded using metadata layout");
+	fixture->types[1] = LogicalType::VARCHAR;
+	fixture->values[1] = Value("actual wire layout");
+	auto opens = fixture->opens;
+	fixture->metadata = R"({"columns":[{"name":"x","position":0,"type_name":"variant"}]})";
+	Check(connection.Query("DESCRIBE SELECT * FROM metadata_fixture()")->HasError() && fixture->opens == opens,
+	      "Unsupported metadata fell back to a read");
+	fixture->metadata.clear();
+	Query(connection, "PREPARE nested_drift AS SELECT nested FROM metadata_fixture()");
+	fixture->nested_drift = true;
+	auto drift = connection.Query("EXECUTE nested_drift");
+	Check(drift->HasError() && drift->GetError().find("projected type changed") != string::npos,
+	      "Nested logical schema drift was not rejected before decoding");
+	fixture->nested_drift = false;
+	fixture->names = {"id", "id_1"};
+	fixture->types = {LogicalType::INTEGER, LogicalType::INTEGER};
+	fixture->values = {Value::INTEGER(42), Value::INTEGER(43)};
+	fixture->duplicate_names = true;
+	auto duplicates = connection.Query("SELECT id, id_1 FROM metadata_fixture()");
+	Check(duplicates->HasError() && duplicates->GetError().find("column name changed") != string::npos,
+	      "Arrow name deduplication hid a changed projection");
+	std::cout << "Metadata-only preparation, large-offset/dictionary/nested decoding and fail-closed schemas passed\n";
+}
+
 void TestTTL(DuckDB &db) {
 	auto fixture = make_shared_ptr<Fixture>();
 	fixture->lifetime = make_shared_ptr<OneLakeCacheLifetime>(*db.instance);
@@ -503,6 +600,19 @@ void TestCatalogRetirement() {
 	ExtensionLoader bind_loader(*db.instance, "bind_tests");
 	bind_loader.RegisterFunction(std::move(bind_function));
 	const string bind_query = "SELECT sum(Price)::BIGINT FROM catalog_fixture()";
+	const auto initial_opens = bind_fixture->opens;
+	for (auto &sql : {"DESCRIBE SELECT * FROM catalog_fixture()", "EXPLAIN SELECT * FROM catalog_fixture()",
+	                  "SELECT * FROM catalog_fixture() LIMIT 0",
+	                  "PREPARE metadata_prepared AS SELECT sum(Price)::BIGINT FROM catalog_fixture()"}) {
+		auto before = bind_fixture->probes;
+		Query(connection, sql);
+		Check(bind_fixture->probes > before && bind_fixture->opens == initial_opens,
+		      "Metadata-only binding opened a row stream or omitted metadata");
+	}
+	Query(connection, "EXECUTE metadata_prepared");
+	Query(connection, "EXECUTE metadata_prepared");
+	Check(bind_fixture->opens == initial_opens + 2, "Prepared execution did not open exactly one read per execution");
+	Query(connection, "DEALLOCATE metadata_prepared");
 	for (idx_t i = 0; i < 2; ++i) {
 		auto probes = bind_fixture->probes;
 		Check(Scalar(connection, bind_query) == 33550336 && bind_fixture->probes == probes + 1,
@@ -580,6 +690,7 @@ void TestCatalogRetirement() {
 
 void TestCachedScan(DuckDB &db) {
 	TestCountProjection(db);
+	TestMetadataExecution(db);
 	TestTTL(db);
 	auto fixture = make_shared_ptr<Fixture>();
 	fixture->lifetime = make_shared_ptr<OneLakeCacheLifetime>(*db.instance);

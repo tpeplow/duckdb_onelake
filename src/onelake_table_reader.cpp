@@ -20,6 +20,7 @@ struct TableReadTarget {
 	string item;
 	string schema;
 	string table;
+	string catalog_url;
 };
 
 class TableReadStream : public ArrowArrayStreamWrapper {
@@ -27,7 +28,10 @@ public:
 	TableReadStream(ClientContext &context_p, OneLakeCredentials &credentials, const TableReadTarget &target,
 	                const vector<string> &columns)
 	    : context(context_p), reader(nullptr, ol_table_reader_close), metrics(OneLakeReadMetrics::Get(context)),
-	      phase(columns.empty() ? ReadPhase::SCHEMA : ReadPhase::EXECUTION) {
+	      phase(ReadPhase::EXECUTION) {
+		if (columns.empty()) {
+			throw InternalException("OneLake execution requires an explicit projection");
+		}
 		OneLakeReadTimer timer(metrics, phase, ReadMetric::READER_OPEN_NS);
 		if (metrics) {
 			metrics->Add(phase, ReadMetric::READER_OPENS, 1);
@@ -38,12 +42,9 @@ public:
 		request["itemId"] = target.item;
 		request["schemaName"] = target.schema;
 		request["tableName"] = target.table;
-		// Omission is the verified wildcard form; ["*"] is treated as a literal column by the service.
-		if (!columns.empty()) {
-			request["columns"] = Json::Value(Json::arrayValue);
-			for (const auto &column : columns) {
-				request["columns"].append(column);
-			}
+		request["columns"] = Json::Value(Json::arrayValue);
+		for (const auto &column : columns) {
+			request["columns"].append(column);
 		}
 		auto token = OneLakeTableAPI::Token(context, credentials);
 		auto json = Json::writeString(Json::StreamWriterBuilder(), request);
@@ -135,6 +136,13 @@ public:
 	OneLakeCacheLifetime &Lifetime() const override {
 		return *lifetime;
 	}
+	OneLakeTableSchema GetSchema(ClientContext &context) override {
+		lifetime->CheckActive();
+		OneLakeLakehouse item;
+		item.id = target.item;
+		item.table_catalog_url = target.catalog_url;
+		return OneLakeTableAPI::GetTable(context, item, target.schema, target.table, catalog.GetCredentials());
+	}
 	OneLakeOpenedRead Open(ClientContext &context, const vector<string> &columns) override {
 		CheckIdentity(context);
 		OneLakeOpenedRead result;
@@ -163,7 +171,8 @@ TableFunction BindOneLakeTableRead(ClientContext &context, OneLakeCatalog &catal
                                    const string &schema, const string &table, unique_ptr<FunctionData> &bind_data,
                                    vector<string> &names, vector<LogicalType> &types) {
 	OneLakeReadTimer timer(OneLakeReadMetrics::Get(context), ReadPhase::SCHEMA, ReadMetric::BIND_NS);
-	TableReadTarget target {item.table_api_origin, catalog.GetWorkspaceId(), item.id, schema, table};
+	TableReadTarget target {item.table_api_origin, catalog.GetWorkspaceId(), item.id, schema, table,
+	                        item.table_catalog_url};
 	bind_data = BindOneLakeCachedScan(context, make_shared_ptr<LiveReadSource>(catalog, std::move(target)),
 	                                  catalog.UsesReadCache(), names, types);
 	return OneLakeCachedScanFunction();

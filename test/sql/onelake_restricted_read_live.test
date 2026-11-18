@@ -139,7 +139,7 @@ SELECT
     (SELECT value FROM onelake_read_metrics() WHERE phase='execution' AND metric='allocation_requests')
       - (SELECT value FROM before_prepared WHERE phase='execution' AND metric='allocation_requests') = 2,
     (SELECT value FROM onelake_read_metrics() WHERE phase='schema' AND metric='allocation_requests')
-      - (SELECT value FROM before_prepared WHERE phase='schema' AND metric='allocation_requests') = 2;
+      - (SELECT value FROM before_prepared WHERE phase='schema' AND metric='allocation_requests') = 0;
 ----
 true	true
 

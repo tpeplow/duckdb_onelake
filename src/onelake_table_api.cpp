@@ -60,7 +60,7 @@ size_t Receive(void *buffer, size_t size, size_t count, void *target) {
 	return size * count;
 }
 
-Json::Value Get(ClientContext &context, const string &url, const string &token) {
+string GetBody(ClientContext &context, const string &url, const string &token) {
 	auto metrics = OneLakeReadMetrics::Get(context);
 	OneLakeReadTimer timer(metrics, ReadPhase::SHARED, ReadMetric::METADATA_NS);
 	std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl(curl_easy_init(), curl_easy_cleanup);
@@ -92,7 +92,11 @@ Json::Value Get(ClientContext &context, const string &url, const string &token) 
 	if (status != CURLE_OK || http_status != 200) {
 		throw IOException("OneLake metadata request failed (HTTP %ld); no file fallback attempted", http_status);
 	}
-	return Parse(body);
+	return body;
+}
+
+Json::Value Get(ClientContext &context, const string &url, const string &token) {
+	return Parse(GetBody(context, url, token));
 }
 
 vector<Json::Value> Pages(ClientContext &context, const string &url, const string &token, const string &field,
@@ -288,6 +292,12 @@ vector<string> OneLakeTableAPI::Tables(ClientContext &context, const OneLakeLake
 	return Names(Pages(
 	    context, item.table_catalog_url + "/tables?catalog_name=" + Encode(item.id) + "&schema_name=" + Encode(schema),
 	    Token(context, credentials), "tables"));
+}
+
+OneLakeTableSchema OneLakeTableAPI::GetTable(ClientContext &context, const OneLakeLakehouse &item, const string &schema,
+                                             const string &table, OneLakeCredentials &credentials) {
+	return ParseOneLakeTableSchema(GetBody(context, OneLakeGetTableURL(item.table_catalog_url, item.id, schema, table),
+	                                       Token(context, credentials)));
 }
 
 } // namespace duckdb

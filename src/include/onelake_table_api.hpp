@@ -1,6 +1,7 @@
 #pragma once
 
 #include "onelake_api.hpp"
+#include "onelake_table_schema.hpp"
 
 namespace duckdb {
 
@@ -12,6 +13,8 @@ public:
 	                              OneLakeCredentials &credentials);
 	static vector<string> Tables(ClientContext &context, const OneLakeLakehouse &item, const string &schema,
 	                             OneLakeCredentials &credentials);
+	static OneLakeTableSchema GetTable(ClientContext &context, const OneLakeLakehouse &item, const string &schema,
+	                                   const string &table, OneLakeCredentials &credentials);
 	static string Token(ClientContext &context, OneLakeCredentials &credentials,
 	                    OneLakeTokenAudience audience = OneLakeTokenAudience::OneLakeDfs);
 };

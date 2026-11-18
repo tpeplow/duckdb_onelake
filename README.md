@@ -104,16 +104,27 @@ deletion. The extension does not call the administrative dataAccessRoles API.
 See the [cache instructions](test/README.md#guarded-arrow-to-parquet-cache-experimental)
 for private storage requirements and normal cleanup.
 
-Schema binding allocates a read session with the column option omitted, reads its
-Arrow schema, and closes it without consuming rows. An uncached execution allocates
-a fresh session with the required columns; a cache hit skips that execution allocation.
-Binding therefore incurs additional billed
-`POST /read` operations, including for metadata-only queries. Prepared statements
-do not retain a read session; the current unversioned catalog also makes DuckDB
-rebind on EXECUTE, including schema probes. A changed projected schema fails
-execution rather than silently converting against stale metadata.
+Schema binding uses the Delta metadata **Get table** API, not `POST /read`.
+DESCRIBE, ordinary EXPLAIN, PREPARE and optimized-away LIMIT 0 queries do not
+allocate read sessions or open read streams. An uncached execution allocates a
+fresh session with the required columns; a cache hit skips that execution allocation.
+Prepared statements do not retain a read session; the current unversioned catalog
+still makes DuckDB rebind on EXECUTE, using fresh metadata GETs without a schema cache.
+A changed projected name or logical type fails execution rather than silently
+converting against stale metadata. Arrow decoding uses the actual execution
+stream's physical layout, not a layout inferred from catalog types.
 Catalog lookup hands its schema bind to scan binding once within the same
 statement; this does not retain schema evidence across executions.
+
+Get table columns support boolean, signed integers, float/double, string, binary,
+date, decimal (precision up to 38), `timestamp` (UTC instants/TIMESTAMPTZ) and
+`timestamp_ntz` (local TIMESTAMP). Fully described arrays, structs and maps are
+supported through Spark `type_json` or `type_text` descriptions. Null type_json
+and type_text use type_name and decimal precision/scale. Incomplete, conflicting,
+ambiguous or unsupported metadata fails clearly, with **no read or file fallback**.
+Metadata GETs still incur service requests; this is not a claim that they are free.
+Metadata visibility is not proof of row/column authorization: execution still uses
+the secured read API and fails if it cannot provide the requested projection.
 
 Projection is pushed to OneLake; filters, joins, aggregates and LIMIT execute in
 DuckDB. COUNT(*) reads authorized rows rather than using catalog row counts,

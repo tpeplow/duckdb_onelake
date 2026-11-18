@@ -12,6 +12,7 @@ using namespace duckdb;
 void TestCachedScan(DuckDB &db);
 void TestCatalogRetirement();
 void TestCacheDirectory(const string &directory);
+void TestTableSchema();
 
 void TestMetadataAccounting() {
 	DBConfig config;
@@ -228,6 +229,7 @@ int main(int argc, char **argv) {
 		DBConfig config;
 		config.options.temporary_directory = argv[1];
 		TestCacheDirectory(argv[1]);
+		TestTableSchema();
 		DuckDB db(nullptr, &config);
 		RegisterOneLakeCacheStorage(*db.instance);
 		TestParquet(db);
