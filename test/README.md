@@ -452,6 +452,9 @@ failure ends the scan.
 
 ### Parallel-stream client impact
 
+See the [2026-11-18 local benchmark results](../docs/benchmarks/parallel-streams-synthetic-2026-11-18.md)
+for measured scaling, CPU/memory trade-offs, controls, and machine-readable evidence.
+
 The normal Rust tests prove overlap and backpressure with gates and exact counters,
 not elapsed-time thresholds. Two opt-in benchmark CLIs quantify trade-offs:
 
