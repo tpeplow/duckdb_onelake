@@ -15,5 +15,6 @@ fn main() {
     println!("cargo:rerun-if-changed=src/ffi.rs");
     println!("cargo:rerun-if-changed=src/lib.rs");
     println!("cargo:rerun-if-changed=src/metrics.rs");
+    println!("cargo:rerun-if-changed=src/parallel.rs");
     println!("cargo:rerun-if-changed=cbindgen.toml");
 }

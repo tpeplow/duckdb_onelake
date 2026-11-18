@@ -4,7 +4,7 @@ use std::time::Instant;
 
 /// Cumulative client-observed counters for one reader. Times are wall-clock nanoseconds.
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, serde::Serialize)]
 pub struct OlReadMetrics {
     pub allocation_requests: u64,
     pub allocation_bytes: u64,
@@ -20,14 +20,22 @@ pub struct OlReadMetrics {
     pub first_batch_ns: u64,
     pub completions: u64,
     pub errors: u64,
+    pub allocated_streams: u64,
+    pub peak_active_streams: u64,
+}
+
+#[derive(Default)]
+struct Counters {
+    values: OlReadMetrics,
+    active_streams: u64,
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct Metrics(Option<Arc<Mutex<OlReadMetrics>>>);
+pub(crate) struct Metrics(Option<Arc<Mutex<Counters>>>);
 
 impl Metrics {
     pub(crate) fn enabled() -> Self {
-        Self(Some(Arc::new(Mutex::new(OlReadMetrics::default()))))
+        Self(Some(Arc::new(Mutex::new(Counters::default()))))
     }
 
     pub(crate) fn start(&self) -> Option<Instant> {
@@ -36,25 +44,52 @@ impl Metrics {
 
     pub(crate) fn update(&self, update: impl FnOnce(&mut OlReadMetrics)) {
         if let Some(data) = &self.0 {
-            update(&mut data.lock().unwrap_or_else(|e| e.into_inner()));
+            update(&mut data.lock().unwrap_or_else(|e| e.into_inner()).values);
         }
     }
 
     pub(crate) fn snapshot(&self) -> OlReadMetrics {
         self.0
             .as_ref()
-            .map(|data| *data.lock().unwrap_or_else(|e| e.into_inner()))
+            .map(|data| data.lock().unwrap_or_else(|e| e.into_inner()).values)
             .unwrap_or_default()
     }
 
-    pub(crate) fn body(&self, input: Box<dyn Read + Send>) -> Box<dyn Read + Send> {
+    pub(crate) fn active_stream(&self) -> ActiveStream {
+        if let Some(data) = &self.0 {
+            let mut data = data.lock().unwrap_or_else(|e| e.into_inner());
+            data.active_streams += 1;
+            data.values.peak_active_streams =
+                data.values.peak_active_streams.max(data.active_streams);
+        }
+        ActiveStream(self.clone())
+    }
+
+    pub(crate) fn body(
+        &self,
+        input: Box<dyn Read + Send>,
+        active: ActiveStream,
+    ) -> Box<dyn Read + Send> {
         if self.0.is_none() {
             input
         } else {
             Box::new(MeasuredBody {
                 input,
                 metrics: self.clone(),
+                _active: active,
             })
+        }
+    }
+}
+
+pub(crate) struct ActiveStream(Metrics);
+
+impl Drop for ActiveStream {
+    fn drop(&mut self) {
+        if let Some(data) = &self.0 .0 {
+            data.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .active_streams -= 1;
         }
     }
 }
@@ -68,6 +103,7 @@ pub(crate) fn elapsed(start: Option<Instant>) -> u64 {
 struct MeasuredBody {
     input: Box<dyn Read + Send>,
     metrics: Metrics,
+    _active: ActiveStream,
 }
 
 impl Read for MeasuredBody {

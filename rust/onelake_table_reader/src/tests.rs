@@ -13,6 +13,9 @@ use arrow_schema::{DataType, Field, Schema};
 
 use super::*;
 
+#[path = "parallel_tests.rs"]
+mod parallel_tests;
+
 fn request() -> ReadRequest {
     ReadRequest {
         base_url: "https://onelake.table.fabric.microsoft.com".into(),
@@ -21,6 +24,133 @@ fn request() -> ReadRequest {
         schema_name: "dbo".into(),
         table_name: "PricePaid".into(),
         columns: Some(vec!["Price".into()]),
+        max_parallel_streams: 1,
+    }
+}
+
+#[test]
+#[ignore = "generates local parallel benchmark fixtures"]
+fn benchmark_fixture() {
+    use arrow_array::StringArray;
+    let directory = std::path::PathBuf::from(std::env::var("ONELAKE_BENCH_FIXTURE_DIR").unwrap());
+    std::fs::create_dir_all(&directory).unwrap();
+    let mut streams = Vec::new();
+    for stream in 0..8 {
+        let mut writer: Option<StreamWriter<Vec<u8>>> = None;
+        let mut ends = Vec::new();
+        for batch in 0..32 {
+            let first = (stream * 32 + batch) * 4096;
+            let price = Float64Array::from(
+                (first..first + 4096)
+                    .map(|id| (id % 7 != 0).then_some(id as f64))
+                    .collect::<Vec<_>>(),
+            );
+            let labels = StringArray::from(vec![Some("x".repeat(64)); 4096]);
+            let dictionary: DictionaryArray<Int32Type> = (0..4096)
+                .map(|i| {
+                    if i % 9 == 0 {
+                        None
+                    } else if i % 2 == 0 {
+                        Some("even")
+                    } else {
+                        Some("odd")
+                    }
+                })
+                .collect();
+            let batch = RecordBatch::try_from_iter(vec![
+                ("Price", Arc::new(price) as ArrayRef),
+                ("Label", Arc::new(labels) as ArrayRef),
+                ("Category", Arc::new(dictionary) as ArrayRef),
+            ])
+            .unwrap();
+            let writer = writer
+                .get_or_insert_with(|| StreamWriter::try_new(Vec::new(), &batch.schema()).unwrap());
+            writer.write(&batch).unwrap();
+            ends.push(writer.get_ref().len());
+        }
+        let mut writer = writer.unwrap();
+        writer.finish().unwrap();
+        ends.push(writer.get_ref().len());
+        let file = format!("stream{stream}.arrow");
+        std::fs::write(directory.join(&file), writer.into_inner().unwrap()).unwrap();
+        streams
+            .push(serde_json::json!({"id": stream.to_string(), "file": file, "batch_ends": ends}));
+    }
+    std::fs::write(
+        directory.join("manifest.json"),
+        serde_json::to_vec(&serde_json::json!({"streams": streams})).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+#[ignore = "reader-only client for the opt-in loopback benchmark"]
+fn benchmark_client() {
+    let url = Url::parse(&std::env::var("ONELAKE_BENCH_URL").unwrap()).unwrap();
+    assert_eq!(url.host_str(), Some("127.0.0.1"));
+    let cap: usize = std::env::var("ONELAKE_BENCH_CAP").unwrap().parse().unwrap();
+    assert!(cap > 0);
+    let scenario = std::env::var("ONELAKE_BENCH_SCENARIO").unwrap();
+    let metrics = Metrics::enabled();
+    let mut transport = HttpTransport::new("loopback-test-only").unwrap();
+    transport.metrics = metrics.clone();
+    let start = Instant::now();
+    let mut reader =
+        TableReader::open_transport_profiled(url, None, Box::new(transport), metrics.clone())
+            .unwrap();
+    reader.max_parallel_streams = cap.min(reader.streams.len() + 1);
+    let mut rows = 0u64;
+    let mut checksum = 0u64;
+    for batch in reader.by_ref() {
+        let batch = batch.unwrap();
+        checksum += batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .iter()
+            .flatten()
+            .map(|value| value as u64)
+            .sum::<u64>();
+        rows += batch.num_rows() as u64;
+        if scenario == "early" {
+            break;
+        }
+        if scenario == "stalled" && rows == batch.num_rows() as u64 {
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+    let shutdown = Instant::now();
+    drop(reader);
+    let shutdown_seconds = shutdown.elapsed().as_secs_f64();
+    let seconds = start.elapsed().as_secs_f64();
+    let counters = metrics.snapshot();
+    if scenario != "early" {
+        let expected = counters.allocated_streams * 32 * 4096;
+        assert_eq!(rows, expected);
+        let multiples = (expected - 1) / 7;
+        assert_eq!(
+            checksum,
+            expected * (expected - 1) / 2 - 7 * multiples * (multiples + 1) / 2
+        );
+        assert_eq!(counters.completions, 1);
+    } else {
+        assert_eq!(rows, 4096);
+        assert_eq!(counters.completions, 0);
+    }
+    assert_eq!(counters.allocation_requests, 1);
+    assert_eq!(counters.errors, 0);
+    assert!(counters.peak_active_streams <= cap as u64);
+    println!(
+        "BENCH_RESULT {}",
+        serde_json::json!({
+            "seconds": seconds, "rows": rows, "checksum": checksum,
+            "metrics": counters, "shutdown_seconds": shutdown_seconds,
+        })
+    );
+    if std::env::var("ONELAKE_BENCH_WAIT_FOR_EXIT").as_deref() == Ok("1") {
+        io::stdout().flush().unwrap();
+        io::stdin().read_line(&mut String::new()).unwrap();
     }
 }
 
@@ -41,7 +171,7 @@ fn encoded(name: &str, values: &[Option<f64>]) -> Vec<u8> {
 }
 
 struct MockTransport {
-    bodies: Mutex<VecDeque<Box<dyn Read + Send>>>,
+    bodies: Mutex<Vec<Option<Box<dyn Read + Send>>>>,
     calls: Arc<Mutex<Vec<String>>>,
 }
 
@@ -56,10 +186,17 @@ impl Transport for MockTransport {
 
     fn stream(&self, url: Url) -> Result<Box<dyn Read + Send>, ReadError> {
         self.calls.lock().unwrap().push(url.path().into());
-        self.bodies
-            .lock()
+        let index = url
+            .path_segments()
             .unwrap()
-            .pop_front()
+            .next_back()
+            .unwrap()
+            .strip_prefix("stream")
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+        self.bodies.lock().unwrap()[index]
+            .take()
             .ok_or(ReadError::Transport)
     }
 }
@@ -74,7 +211,7 @@ fn reader_with_columns(
 ) -> (TableReader, Arc<Mutex<Vec<String>>>) {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let transport = MockTransport {
-        bodies: Mutex::new(bodies.into()),
+        bodies: Mutex::new(bodies.into_iter().map(Some).collect()),
         calls: calls.clone(),
     };
     let request = request();
@@ -124,7 +261,7 @@ fn measured_reader(streams: Vec<Vec<u8>>, metrics: Metrics) -> TableReader {
         bodies: Mutex::new(
             streams
                 .into_iter()
-                .map(|bytes| Box::new(Cursor::new(bytes)) as Box<dyn Read + Send>)
+                .map(|bytes| Some(Box::new(Cursor::new(bytes)) as Box<dyn Read + Send>))
                 .collect(),
         ),
         calls: Arc::new(Mutex::new(Vec::new())),
@@ -525,7 +662,7 @@ fn restricts_token_destination_and_encodes_path_components() {
 #[test]
 fn rejects_oversized_metadata_before_reading_or_allocating_it() {
     let state = ReadState {
-        cancellation: Cancellation(Arc::new(AtomicBool::new(false))),
+        cancellation: Cancellation::new(),
         deadline: Instant::now() + Duration::from_secs(60),
     };
     let mut bytes = vec![255; 4];

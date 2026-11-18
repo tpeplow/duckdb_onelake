@@ -34,6 +34,8 @@ enum class ReadMetric {
 	ARROW_FETCH_NS,
 	ARROW_OPERATOR_NS,
 	OUTPUT_ROWS,
+	ALLOCATED_STREAMS,
+	PEAK_ACTIVE_STREAMS,
 	COUNT
 };
 
@@ -41,6 +43,7 @@ struct OneLakeReadMetrics : ClientContextState {
 	using Counters = std::array<std::array<uint64_t, static_cast<size_t>(ReadMetric::COUNT)>, 3>;
 	static shared_ptr<OneLakeReadMetrics> Get(ClientContext &context);
 	void Add(ReadPhase phase, ReadMetric metric, uint64_t value);
+	void Max(ReadPhase phase, ReadMetric metric, uint64_t value);
 	Counters Snapshot();
 
 private:

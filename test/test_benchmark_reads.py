@@ -4,6 +4,15 @@ from benchmark_reads import comparable_result, difference, parse_metrics, parse_
 
 
 class BenchmarkMetricsTest(unittest.TestCase):
+    def test_peak_stream_metric_is_a_high_water_snapshot(self):
+        self.assertEqual(
+            difference(
+                {"execution.allocated_streams": 16, "execution.peak_active_streams": 4},
+                {"execution.allocated_streams": 8, "execution.peak_active_streams": 4},
+            ),
+            {"execution.allocated_streams": 8, "execution.peak_active_streams": 4},
+        )
+
     def test_metrics_and_profile_control_do_not_replace_query_timing(self):
         stdout = (
             'BENCH_QUERY_0\n[{"n":10}]\nRun Time (s): real 1.25 user 0.1 sys 0.0\n'

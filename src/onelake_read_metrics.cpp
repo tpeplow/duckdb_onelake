@@ -31,7 +31,9 @@ constexpr const char *NAMES[] = {"token_calls",
                                  "errors",
                                  "arrow_fetch_ns",
                                  "arrow_operator_ns",
-                                 "output_rows"};
+                                 "output_rows",
+                                 "allocated_streams",
+                                 "peak_active_streams"};
 static_assert(sizeof(NAMES) / sizeof(NAMES[0]) == static_cast<size_t>(ReadMetric::COUNT));
 
 struct MetricsScan : GlobalTableFunctionState {
@@ -92,6 +94,12 @@ void OneLakeReadMetrics::Add(ReadPhase phase, ReadMetric metric, uint64_t value)
 OneLakeReadMetrics::Counters OneLakeReadMetrics::Snapshot() {
 	lock_guard<mutex> guard(lock);
 	return values;
+}
+
+void OneLakeReadMetrics::Max(ReadPhase phase, ReadMetric metric, uint64_t value) {
+	lock_guard<mutex> guard(lock);
+	auto &counter = values[static_cast<size_t>(phase)][static_cast<size_t>(metric)];
+	counter = MaxValue(counter, value);
 }
 
 OneLakeReadTimer::OneLakeReadTimer(shared_ptr<OneLakeReadMetrics> metrics_p, ReadPhase phase_p, ReadMetric metric_p)

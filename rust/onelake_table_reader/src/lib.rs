@@ -1,13 +1,14 @@
 mod ffi;
 mod ipc;
 mod metrics;
+mod parallel;
 
 use std::collections::{HashSet, VecDeque};
-use std::io::Read;
+use std::io::{self, Read};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc, Condvar,
 };
 use std::time::{Duration, Instant};
 
@@ -24,7 +25,7 @@ use metrics::{elapsed, Metrics};
 
 const MAX_ALLOCATION_BYTES: u64 = 1024 * 1024;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum ReadError {
     #[error("Invalid table read request: {0}")]
     InvalidRequest(&'static str),
@@ -58,10 +59,21 @@ pub struct ReadRequest {
     pub schema_name: String,
     pub table_name: String,
     pub columns: Option<Vec<String>>,
+    #[serde(default = "serial_streams")]
+    pub max_parallel_streams: usize,
+}
+
+fn serial_streams() -> usize {
+    1
 }
 
 impl ReadRequest {
     fn table_url(&self) -> Result<Url, ReadError> {
+        if self.max_parallel_streams == 0 {
+            return Err(ReadError::InvalidRequest(
+                "maxParallelStreams must be positive",
+            ));
+        }
         let mut url = Url::parse(&self.base_url)
             .map_err(|_| ReadError::InvalidRequest("invalid service origin"))?;
         let host = url.host_str().unwrap_or_default();
@@ -115,11 +127,16 @@ impl ReadRequest {
 }
 
 #[derive(Clone)]
-pub struct Cancellation(Arc<AtomicBool>);
+pub struct Cancellation(Arc<AtomicBool>, Arc<Condvar>);
 
 impl Cancellation {
+    fn new() -> Self {
+        Self(Arc::new(AtomicBool::new(false)), Arc::new(Condvar::new()))
+    }
+
     pub fn cancel(&self) {
         self.0.store(true, Ordering::Relaxed);
+        self.1.notify_all();
     }
 }
 
@@ -141,7 +158,7 @@ impl ReadState {
     }
 }
 
-trait Transport: Send {
+trait Transport: Send + Sync {
     fn allocate(
         &self,
         table_url: &Url,
@@ -286,10 +303,14 @@ impl Transport for HttpTransport {
 }
 
 pub struct TableReader {
-    transport: Box<dyn Transport>,
+    transport: Arc<dyn Transport>,
     table_url: Url,
     streams: VecDeque<String>,
-    current: Option<StreamReader<FramedReader>>,
+    current: Option<DecodedStream>,
+    max_parallel_streams: usize,
+    parallel: Option<parallel::ParallelReader>,
+    #[cfg(test)]
+    fail_spawn_at: Option<usize>,
     source_schema: SchemaRef,
     schema: SchemaRef,
     projection: Option<Vec<usize>>,
@@ -314,17 +335,77 @@ impl Transport for MeasuredTransport {
         self.metrics.update(|m| m.allocation_requests += 1);
         let result = self.inner.allocate(url, columns);
         let ns = elapsed(start);
-        self.metrics.update(|m| m.allocation_ns += ns);
+        self.metrics.update(|m| {
+            m.allocation_ns += ns;
+            if let Ok(streams) = &result {
+                m.allocated_streams += streams.len() as u64;
+            }
+        });
         result
     }
 
     fn stream(&self, url: Url) -> Result<Box<dyn Read + Send>, ReadError> {
         let start = self.metrics.start();
+        let active = self.metrics.active_stream();
         self.metrics.update(|m| m.stream_requests += 1);
         let result = self.inner.stream(url);
         let ns = elapsed(start);
         self.metrics.update(|m| m.stream_open_ns += ns);
-        result.map(|body| self.metrics.body(body))
+        result.map(|body| self.metrics.body(body, active))
+    }
+}
+
+struct TimedInput {
+    body: Box<dyn Read + Send>,
+    read_ns: Arc<AtomicU64>,
+    metrics: Metrics,
+}
+
+impl Read for TimedInput {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let start = self.metrics.start();
+        let result = self.body.read(buffer);
+        self.read_ns.fetch_add(elapsed(start), Ordering::Relaxed);
+        result
+    }
+}
+
+struct DecodedStream {
+    reader: StreamReader<FramedReader>,
+    read_ns: Arc<AtomicU64>,
+}
+
+impl DecodedStream {
+    fn schema(&self) -> SchemaRef {
+        self.reader.schema()
+    }
+
+    fn next_batch(
+        &mut self,
+        state: &ReadState,
+        metrics: &Metrics,
+        projection: &Option<Vec<usize>>,
+    ) -> Result<Option<RecordBatch>, ReadError> {
+        state.check()?;
+        let before = self.read_ns.load(Ordering::Relaxed);
+        let start = metrics.start();
+        let result = (|| {
+            let result = self.reader.next();
+            state.check()?;
+            result
+                .map(|batch| {
+                    let batch = batch.map_err(|_| ReadError::Arrow)?;
+                    match projection {
+                        Some(indices) => batch.project(indices).map_err(|_| ReadError::Arrow),
+                        None => Ok(batch),
+                    }
+                })
+                .transpose()
+        })();
+        let ns = elapsed(start)
+            .saturating_sub(self.read_ns.load(Ordering::Relaxed).saturating_sub(before));
+        metrics.update(|m| m.ipc_processing_ns += ns);
+        result
     }
 }
 
@@ -332,15 +413,20 @@ fn decode_stream(
     body: Box<dyn Read + Send>,
     state: ReadState,
     metrics: &Metrics,
-) -> Result<StreamReader<FramedReader>, ReadError> {
-    let before = metrics.snapshot();
+) -> Result<DecodedStream, ReadError> {
+    let read_ns = Arc::new(AtomicU64::new(0));
+    let body = Box::new(TimedInput {
+        body,
+        read_ns: read_ns.clone(),
+        metrics: metrics.clone(),
+    });
     let start = metrics.start();
-    let result = StreamReader::try_new_unbuffered(FramedReader::new(body, state), None)
+    let result = StreamReader::try_new_unbuffered(FramedReader::new(body, state.clone()), None)
         .map_err(|_| ReadError::Arrow);
-    let ns =
-        elapsed(start).saturating_sub(metrics.snapshot().stream_read_ns - before.stream_read_ns);
+    let ns = elapsed(start).saturating_sub(read_ns.load(Ordering::Relaxed));
     metrics.update(|m| m.ipc_processing_ns += ns);
-    result
+    state.check()?;
+    result.map(|reader| DecodedStream { reader, read_ns })
 }
 
 impl TableReader {
@@ -358,7 +444,14 @@ impl TableReader {
         let table_url = request.table_url()?;
         let mut transport = HttpTransport::new(token)?;
         transport.metrics = metrics.clone();
-        Self::open_transport_profiled(table_url, request.columns, Box::new(transport), metrics)
+        let mut reader = Self::open_transport_profiled(
+            table_url,
+            request.columns,
+            Box::new(transport),
+            metrics,
+        )?;
+        reader.max_parallel_streams = request.max_parallel_streams.min(reader.streams.len() + 1);
+        Ok(reader)
     }
 
     #[cfg(test)]
@@ -386,7 +479,7 @@ impl TableReader {
             transport
         };
         let state = ReadState {
-            cancellation: Cancellation(Arc::new(AtomicBool::new(false))),
+            cancellation: Cancellation::new(),
             deadline: Instant::now() + Duration::from_secs(60 * 60),
         };
         let mut streams = transport.allocate(&table_url, columns.as_deref())?;
@@ -420,10 +513,14 @@ impl TableReader {
             None => source_schema.clone(),
         };
         Ok(Self {
-            transport,
+            transport: Arc::from(transport),
             table_url,
             streams,
             current: Some(current),
+            max_parallel_streams: 1,
+            parallel: None,
+            #[cfg(test)]
+            fail_spawn_at: None,
             source_schema,
             schema,
             projection,
@@ -439,21 +536,23 @@ impl TableReader {
     }
 
     fn next_batch(&mut self) -> Result<Option<RecordBatch>, ReadError> {
+        if self.max_parallel_streams > 1 {
+            if self.parallel.is_none() {
+                self.state.check()?;
+                self.parallel = Some(parallel::ParallelReader::start(
+                    self,
+                    self.max_parallel_streams.min(self.streams.len() + 1),
+                )?);
+            }
+            return self.parallel.as_ref().unwrap().next();
+        }
         loop {
             self.state.check()?;
             if let Some(current) = &mut self.current {
-                if let Some(batch) = current.next() {
-                    // Preserve cancellation/expiry instead of disguising them as decode failures.
-                    self.state.check()?;
-                    let batch = batch.map_err(|_| ReadError::Arrow)?;
-                    // The service can return columns in table order, not request order.
-                    return match &self.projection {
-                        Some(indices) => batch
-                            .project(indices)
-                            .map(Some)
-                            .map_err(|_| ReadError::Arrow),
-                        None => Ok(Some(batch)),
-                    };
+                if let Some(batch) =
+                    current.next_batch(&self.state, &self.metrics, &self.projection)?
+                {
+                    return Ok(Some(batch));
                 }
             }
             self.state.check()?;
@@ -464,10 +563,7 @@ impl TableReader {
             let body = self
                 .transport
                 .stream(child_url(&self.table_url, &["readStream", &stream]))?;
-            // This schema decode is included in the enclosing next() processing timer.
-            let reader =
-                StreamReader::try_new_unbuffered(FramedReader::new(body, self.state.clone()), None)
-                    .map_err(|_| ReadError::Arrow)?;
+            let reader = decode_stream(body, self.state.clone(), &self.metrics)?;
             if reader.schema() != self.source_schema {
                 return Err(ReadError::SchemaChanged);
             }
@@ -484,15 +580,8 @@ impl Iterator for TableReader {
             return None;
         }
         // Arrow's C stream callbacks call this iterator; Rust panics must not cross that ABI.
-        let before = self.metrics.snapshot();
-        let start = self.metrics.start();
         let result = catch_unwind(AssertUnwindSafe(|| self.next_batch()))
             .unwrap_or(Err(ReadError::Internal));
-        let after = self.metrics.snapshot();
-        let ns = elapsed(start)
-            .saturating_sub(after.stream_read_ns - before.stream_read_ns)
-            .saturating_sub(after.stream_open_ns - before.stream_open_ns);
-        self.metrics.update(|m| m.ipc_processing_ns += ns);
         match result {
             Ok(Some(batch)) => {
                 self.metrics.update(|m| {
@@ -507,6 +596,7 @@ impl Iterator for TableReader {
             }
             result => {
                 self.finished = true;
+                self.parallel = None;
                 self.current = None;
                 self.streams.clear();
                 match result {
@@ -521,6 +611,13 @@ impl Iterator for TableReader {
                 }
             }
         }
+    }
+}
+
+impl Drop for TableReader {
+    fn drop(&mut self) {
+        self.state.cancellation.cancel();
+        self.parallel = None;
     }
 }
 

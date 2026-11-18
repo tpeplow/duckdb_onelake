@@ -129,8 +129,16 @@ the secured read API and fails if it cannot provide the requested projection.
 Projection is pushed to OneLake; filters, joins, aggregates and LIMIT execute in
 DuckDB. COUNT(*) reads authorized rows rather than using catalog row counts,
 using a narrow authorized primitive column when available.
-Streams run sequentially and all must finish for a complete result. LIMIT can
-stop early, although the service may return a large batch first. Bind/uncached execution
+Independent streams run concurrently, capped at `min(threads, allocated streams)`
+per read allocation. `SET threads=1` retains serial reading; thread settings are
+captured when execution opens, including prepared execution. Batches arrive as
+ready, so unordered LIMIT samples can change; use ORDER BY when ordering matters.
+All streams must finish for a complete result. LIMIT can stop early, but parallel
+workers may already have opened additional GETs and prefetched batches.
+Each worker holds at most one decoding-in-flight or queued batch, plus its IPC
+frame/dictionaries. This memory scales with concurrency and is not constrained
+by DuckDB's memory_limit. Native conversion and cache encoding remain serial.
+Bind/uncached execution
 are separate snapshots; there is no cross-query snapshot guarantee.
 
 The attachment pins the token's tenant/object identity. `CHAIN 'cli'` uses only

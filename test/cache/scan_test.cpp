@@ -12,6 +12,7 @@
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "onelake_cached_scan.hpp"
 #include "onelake_cache_storage.hpp"
+#include "onelake_read_metrics.hpp"
 
 #include <iostream>
 #include <chrono>
@@ -666,6 +667,12 @@ void TestCatalogRetirement() {
 	ExtensionLoader loader(*db.instance, "detach_tests");
 	loader.RegisterFunction(std::move(function));
 	Query(connection, "SET onelake_enable_read_metrics=true");
+	auto read_metrics = OneLakeReadMetrics::Get(*connection.context);
+	read_metrics->Max(ReadPhase::EXECUTION, ReadMetric::PEAK_ACTIVE_STREAMS, 4);
+	read_metrics->Max(ReadPhase::EXECUTION, ReadMetric::PEAK_ACTIVE_STREAMS, 2);
+	Check(Scalar(connection, "SELECT value FROM onelake_read_metrics() "
+	                         "WHERE phase='execution' AND metric='peak_active_streams'") == 4,
+	      "Peak stream concurrency must aggregate with max, not addition");
 	Query(connection, "PREPARE detached_scan AS SELECT sum(Price)::BIGINT FROM detach_fixture()");
 	Check(Scalar(connection, "EXECUTE detached_scan") == 33550336, "Attached synthetic source failed");
 	const string output_rows =

@@ -8,6 +8,7 @@
 #include "duckdb/function/table/arrow.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/config.hpp"
+#include "duckdb/main/database.hpp"
 #include <json/json.h>
 #include <cstring>
 
@@ -42,6 +43,7 @@ public:
 		request["itemId"] = target.item;
 		request["schemaName"] = target.schema;
 		request["tableName"] = target.table;
+		request["maxParallelStreams"] = Json::UInt64(context.db->NumberOfThreads());
 		request["columns"] = Json::Value(Json::arrayValue);
 		for (const auto &column : columns) {
 			request["columns"].append(column);
@@ -60,6 +62,17 @@ public:
 		reader.reset(handle);
 		if (ol_table_reader_export(reader.get(), &arrow_array_stream, error, sizeof(error)) != 0) {
 			throw IOException("%s", error);
+		}
+	}
+
+	~TableReadStream() override {
+		ol_table_reader_cancel(reader.get());
+		if (arrow_array_stream.release) {
+			arrow_array_stream.release(&arrow_array_stream);
+		}
+		try {
+			Update();
+		} catch (...) {
 		}
 	}
 
@@ -107,6 +120,8 @@ private:
 		PUBLISH(first_batch_ns, FIRST_BATCH_NS);
 		PUBLISH(completions, COMPLETIONS);
 		PUBLISH(errors, ERRORS);
+		PUBLISH(allocated_streams, ALLOCATED_STREAMS);
+		metrics->Max(phase, ReadMetric::PEAK_ACTIVE_STREAMS, current.peak_active_streams);
 #undef PUBLISH
 		previous = current;
 	}

@@ -192,7 +192,7 @@ add_custom_command(
   DEPENDS ${READER_CRATE_DIR}/Cargo.toml ${READER_CRATE_DIR}/Cargo.lock
           ${READER_CRATE_DIR}/build.rs ${READER_CRATE_DIR}/cbindgen.toml
           ${READER_CRATE_DIR}/src/lib.rs ${READER_CRATE_DIR}/src/ipc.rs ${READER_CRATE_DIR}/src/ffi.rs
-          ${READER_CRATE_DIR}/src/metrics.rs
+          ${READER_CRATE_DIR}/src/metrics.rs ${READER_CRATE_DIR}/src/parallel.rs
   VERBATIM
 )
 add_custom_target(onelake_table_reader ALL DEPENDS ${READER_LIB} ${READER_HEADER})

@@ -85,7 +85,9 @@ SET onelake_enable_read_metrics = false;
 
 Use the authentication setup in the README and substitute your schema, table and
 column. The setting defaults to false. Counters accumulate until the connection
-closes; subtract snapshots to measure a statement. Disabling collection preserves
+closes; subtract cumulative snapshots to measure a statement. The
+`peak_active_streams` high-water mark aggregates with max, not addition or subtraction;
+use a fresh connection for an isolated per-query peak. Disabling collection preserves
 existing counters. Metrics queries do not reset them or contact OneLake. No query
 text, identities, tokens, URLs, stream IDs, headers or rows are included.
 
@@ -100,9 +102,10 @@ in `_ns` are wall-clock nanoseconds, **not CPU time**.
 | `metadata_requests`, `metadata_bytes`, `metadata_ns` | Table API discovery/catalog/Get table HTTP attempts, response bytes retained by the bounded receiver, and request time. |
 | `bind_ns`, `reader_opens`, `reader_open_ns` | Metadata binding adapter time and execution stream-construction attempts/time. Binding does not include all earlier catalog discovery. |
 | `allocation_requests`, `allocation_bytes`, `allocation_ns` | Rust POST attempts, consumed allocation-response bytes, and allocation/parse time. Attempts are not a billing ledger. |
+| `allocated_streams`, `peak_active_streams` | Total streams returned by allocations, and the maximum simultaneously open stream requests/bodies per reader (connection aggregate: max). Includes backpressure waits, not a measure of simultaneous CPU work or wire transfer. |
 | `stream_requests`, `stream_open_ns` | Rust GET attempts and time until response headers are available. |
 | `stream_bytes`, `stream_read_ns` | Bytes returned by successful response-body reads and time spent in those reads. Includes IPC metadata/dictionaries, not just values. |
-| `ipc_processing_ns` | Framing, validation, decoding and batch projection time after subtracting observed body-read and stream-open time. Includes allocation/copies/scheduling and instrumentation overhead. |
+| `ipc_processing_ns` | Sum of worker-local framing, validation, decoding and projection elapsed time minus that worker's observed body-read time. Excludes stream-open and ready-queue waits; includes allocation/copies/scheduling and instrumentation overhead. |
 | `batches`, `rows` | Arrow batches/rows delivered by Rust, including surplus rows received for LIMIT. |
 | `first_batches`, `first_batch_ns` | Number of readers reaching a first batch and sum of allocation-start-to-first-batch spans. Includes intervening consumer delay; divide by first_batches for a mean. |
 | `completions`, `errors` | Readers reaching EOF and Rust open/iteration errors. Early LIMIT termination is not completion; native token/binding errors are not Rust errors. |
@@ -113,13 +116,15 @@ Get table, counted in shared metadata metrics. PREPARE, DESCRIBE, ordinary EXPLA
 and optimized-away LIMIT 0 must not allocate reads. EXECUTE may still rebind and
 fetch metadata; no schema cache is introduced.
 
-Times overlap: reader-open includes allocation/initial-stream work; binding
+Times overlap, including between parallel workers: reader-open includes allocation/initial-stream work; binding
 includes Get table work; first-batch spans include several stages.
 `arrow_operator_ns - arrow_fetch_ns` estimates remaining native conversion/scan
 overhead, not isolated conversion CPU. Do not sum all durations. Server execution,
 DNS/TLS, network buffering and scheduling are not independently observable.
 Body bytes are client-consumed bytes, **not wire traffic**: TLS/HTTP overhead,
-prefetch and bytes abandoned after LIMIT are excluded.
+transport-internal prefetch not consumed by Rust is excluded. Bytes consumed by
+workers but abandoned after LIMIT are included, even if their batches were never
+delivered. Native teardown publishes the final counters after joining workers.
 
 These counters instrument the TABLE_API path, not DIRECT_FILES' catalog or Delta
 kernel HTTP. Zero counters in direct-file mode do not mean zero traffic.
@@ -401,7 +406,9 @@ cargo clippy --locked --manifest-path rust/onelake_table_reader/Cargo.toml --all
 ```
 
 These tests use in-memory Arrow streams and loopback HTTP, not Fabric credentials.
-They cover multiple streams, empty tables, dictionary/null preservation, truncated
+They cover gated overlapping reads, as-ready delivery, worker caps, per-worker
+batch credits, early-drop/join, worker panic/start failure, multiple streams,
+empty tables, independent dictionary/null preservation, truncated
 transfers, schema changes, cancellation, expiry, message limits, HTTP failures,
 redirect rejection, and Arrow C stream ownership.
 
@@ -423,13 +430,68 @@ Clear the environment variables afterwards. This test is deliberately partial:
 it does not establish full-table completeness, RLS/CLS enforcement, or write
 permissions. Do not run write tests against that read target.
 
-The initial reader consumes independent streams sequentially, buffers at most one
-IPC message internally, and rejects metadata over 1 MiB, bodies over 256 MiB,
+The native adapter passes the current DuckDB thread count, capped to the allocated
+stream count, per allocation. Direct Rust/FFI callers may set the client-only
+positive integer `maxParallelStreams`; omission defaults to 1. This field is never
+sent to the service. Single-stream allocations and threads=1 use the serial path.
+Parallel workers yield batches as ready, not in allocation order. Each worker
+holds at most one in-flight/queued batch credit and one IPC message internally.
+The reader rejects metadata over 1 MiB, bodies over 256 MiB,
 cumulative dictionary payload over 256 MiB per stream, and compressed IPC. Arrow
-conversion and batches retained by the consumer require additional memory.
+conversion, consumer-held batches and cache encoding require additional memory.
+Worker frame/dictionary/batch memory scales with concurrency independently of
+DuckDB memory_limit; there is no query-wide pool or shared byte budget.
 It uses a 15-second connection timeout, a 60-second per-request timeout, and a
 60-minute local session deadline. Cancellation is cooperative; a blocked network
 read can take up to its request timeout to return. No retries, redirects,
 automatic token refresh, session reallocation, or direct-file fallback occur.
 Acquire a fresh caller token before opening a reader; mid-session authentication
 failure ends the scan.
+
+### Parallel-stream client impact
+
+The normal Rust tests prove overlap and backpressure with gates and exact counters,
+not elapsed-time thresholds. Two opt-in benchmark CLIs quantify trade-offs:
+
+```powershell
+python test\benchmark_streams.py --run-benchmark `
+  --test-exe <release-Rust-unit-test-executable> --fixture-dir <new-fixture-directory> `
+  --source <revision-and-worktree-state> --host-conditions <observed-load> --output <new-report.json>
+
+python test\benchmark_parallel_reads.py --approved-live-read `
+  --serial-shell <archived-serial-duckdb.exe> --candidate-shell build\release\duckdb.exe `
+  --workspace <approved-workspace-id> --item <approved-item-id> `
+  --candidate-source <revision-and-worktree-state> --host-conditions <observed-load> `
+  --output <new-report.json>
+```
+
+Build the Rust unit-test executable with `cargo test --release --no-run --locked
+--manifest-path rust\onelake_table_reader\Cargo.toml`. The deterministic benchmark
+uses a separate loopback server and eight streams of 32 batches x 4,096 rows,
+including strings, NULLs and dictionaries. It compares caps 1/2/4/8 with balanced,
+skewed, fast, stalled-consumer, early-stop and single-stream controls. Each
+configuration has one excluded warm-up and five measured runs.
+
+The live benchmark requires an explicitly approved PricePaid-compatible table.
+It compares an archived serial build with the candidate at the **same threads=4**
+setting, with TABLE_API, Azure CLI credentials and both read caches off. Sign in
+to the approved tenant with Azure CLI before running it. It reserves attempts durably
+before launching a fresh process, refuses report overwrite and never retries.
+Two narrow-aggregate pilots gate the remaining three paired repetitions of
+narrow aggregation, wider County grouping and LIMIT 10. The hard ceiling is
+20 attempts, including 14 full scans; failures consume the budget. A single-stream
+allocation or inconsistent pilot result stops the comparison.
+
+Reports include wall time, process CPU, rows/bytes per second, first-batch latency,
+stream diagnostics and LIMIT amplification. On Windows, OS counters supply process
+peak working set (including setup) and sampled query working set/private bytes.
+Sampled peaks can miss short spikes; process memory is not DuckDB-managed memory.
+Resource collection is explicitly unavailable where unsupported. Decimal sums
+compare Price rounded to two decimal places to avoid floating-point reduction-order
+differences. Full-result comparisons assume a stable source; unordered LIMIT
+values need not match. Reports retain per-run data and median/ranges, not p95 claims
+from three pairs. No arbitrary speedup threshold replaces correctness checks.
+
+Run Python regressions with `python -m unittest discover -s test -p 'test_benchmark*.py'`.
+Set `ONELAKE_BENCH_SMOKE_SHELL` to a built shell to include the offline prepared-SELECT
+resource-collection smoke test. These tests do not contact OneLake.

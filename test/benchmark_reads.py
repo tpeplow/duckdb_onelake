@@ -44,7 +44,10 @@ def parse_metrics(stdout, marker):
 
 
 def difference(after, before):
-    return {key: value - before.get(key, 0) for key, value in after.items()}
+    return {
+        key: value if key.endswith(".peak_active_streams") else value - before.get(key, 0)
+        for key, value in after.items()
+    }
 
 
 def comparable_result(case, rows):
@@ -93,9 +96,7 @@ def main():
         choices=["DIRECT_FILES", "TABLE_API"],
         default=["DIRECT_FILES", "TABLE_API"],
     )
-    parser.add_argument(
-        "--external-file-cache", choices=["true", "false"], default="false"
-    )
+    parser.add_argument("--external-file-cache", choices=["true", "false"], default="false")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.repeats < 1:
@@ -122,25 +123,16 @@ def main():
             f"min({column}) AS minimum, max({column}) AS maximum, "
             f"sum({column}) AS total FROM {table}"
         ),
-        "filter": (
-            f"SELECT count(*) AS n, sum({column}) AS total FROM {table} "
-            f"WHERE {column} >= 10000000"
-        ),
-        "impossible": (
-            f"SELECT count(*) AS n FROM {table} WHERE {column} > 1000000000"
-        ),
+        "filter": (f"SELECT count(*) AS n, sum({column}) AS total FROM {table} " f"WHERE {column} >= 10000000"),
+        "impossible": (f"SELECT count(*) AS n FROM {table} WHERE {column} > 1000000000"),
     }
     if args.cases:
         queries = {case: queries[case] for case in args.cases}
     report = {
         "started_at_utc": datetime.now(timezone.utc).isoformat(),
-        "source_commit": subprocess.check_output(
-            ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
-        ).strip(),
+        "source_commit": subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip(),
         "source_dirty": bool(
-            subprocess.check_output(
-                ["git", "-C", str(root), "status", "--porcelain"], text=True
-            ).strip()
+            subprocess.check_output(["git", "-C", str(root), "status", "--porcelain"], text=True).strip()
         ),
         "binary_source": args.binary_source,
         "shell_sha256": hashlib.sha256(args.shell.read_bytes()).hexdigest(),
@@ -182,8 +174,7 @@ def main():
                 f"SET onelake_enable_read_metrics={'true' if args.read_metrics else 'false'};",
                 "LOAD azure;",
                 "CREATE SECRET bench (TYPE ONELAKE, PROVIDER credential_chain, CHAIN 'env');",
-                f"ATTACH '{args.workspace}/{args.item}' AS lake "
-                f"(TYPE ONELAKE, READ_MODE '{mode}', READ_ONLY);",
+                f"ATTACH '{args.workspace}/{args.item}' AS lake " f"(TYPE ONELAKE, READ_MODE '{mode}', READ_ONLY);",
             ]
             if args.read_metrics:
                 commands += [
@@ -203,9 +194,7 @@ def main():
             profiles = []
             for index in range(args.repeats):
                 if args.profile:
-                    path = args.output.resolve().with_name(
-                        f"{args.output.stem}-{mode}-{case}-{index}.profile.json"
-                    )
+                    path = args.output.resolve().with_name(f"{args.output.stem}-{mode}-{case}-{index}.profile.json")
                     if path.exists():
                         raise RuntimeError("Refusing to overwrite a profile")
                     profiles.append(path)
@@ -237,17 +226,11 @@ def main():
             )
             # Do not persist service errors, tokens, raw output or environment variables.
             if result.returncode:
-                raise RuntimeError(
-                    f"{mode}/{case} failed with exit code {result.returncode}"
-                )
+                raise RuntimeError(f"{mode}/{case} failed with exit code {result.returncode}")
             runs = parse_runs(result.stdout)
             if len(runs) != args.repeats:
                 raise RuntimeError("Incomplete benchmark output")
-            setup_metrics = (
-                parse_metrics(result.stdout, "BENCH_METRICS_SETUP")
-                if args.read_metrics
-                else {}
-            )
+            setup_metrics = parse_metrics(result.stdout, "BENCH_METRICS_SETUP") if args.read_metrics else {}
             previous = setup_metrics
             prepare_seconds = None
             prepare_metrics = {}
@@ -265,19 +248,13 @@ def main():
                 comparable = comparable_result(case, run["result"])
                 reference = references.setdefault(case, comparable)
                 if comparable != reference:
-                    raise RuntimeError(
-                        f"Result mismatch for {mode}/{case}; source may have changed"
-                    )
+                    raise RuntimeError(f"Result mismatch for {mode}/{case}; source may have changed")
                 if args.read_metrics:
-                    current = parse_metrics(
-                        result.stdout, f"BENCH_METRICS_{run['iteration']}"
-                    )
+                    current = parse_metrics(result.stdout, f"BENCH_METRICS_{run['iteration']}")
                     run["metrics"] = difference(current, previous)
                     previous = current
                 if args.profile:
-                    profile = json.loads(
-                        profiles[run["iteration"]].read_text(encoding="utf-8")
-                    )
+                    profile = json.loads(profiles[run["iteration"]].read_text(encoding="utf-8"))
                     run["profile"] = profile
                     profiles[run["iteration"]].unlink()
             report["experiments"].append(
@@ -292,9 +269,7 @@ def main():
                     "runs": runs,
                 }
             )
-            args.output.write_text(
-                json.dumps(report, indent=2) + "\n", encoding="utf-8"
-            )
+            args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
             print([run["seconds"] for run in runs], flush=True)
     report["equivalent"] = True
     args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
